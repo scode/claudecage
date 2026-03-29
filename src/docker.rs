@@ -10,6 +10,15 @@ const IMAGE_NAME: &str = "claudecage:latest";
 const CONTAINER_NAME: &str = "claudecage";
 const DOCKERFILE: &str = include_str!("dockerfile.txt");
 
+pub fn image_exists() -> Result<bool> {
+    let output = Command::new("docker")
+        .args(["image", "inspect", IMAGE_NAME])
+        .output()
+        .context("failed to run docker image inspect")?;
+
+    Ok(output.status.success())
+}
+
 /// Build the Docker image from the embedded Dockerfile.
 pub fn build_image() -> Result<()> {
     let tmp = tempfile::tempdir().context("failed to create temp dir for Dockerfile")?;
@@ -32,14 +41,14 @@ pub fn build_image() -> Result<()> {
     Ok(())
 }
 
-/// Create and start the claudecage container with the given mounts.
+/// Create the claudecage container with the given mounts and start it.
 ///
 /// The container runs `sleep infinity` as its main process so it stays
 /// alive for `docker exec` invocations. Capabilities are dropped to
 /// reduce the attack surface.
 pub fn create_container(mounts: &[Mount], home: &Path) -> Result<()> {
     if container_exists()? {
-        bail!("container '{CONTAINER_NAME}' already exists — remove it first or use 'refresh'");
+        bail!("container '{CONTAINER_NAME}' already exists — run 'docker rm -f {CONTAINER_NAME}' to recreate");
     }
 
     let home_str = home
@@ -85,14 +94,7 @@ pub fn create_container(mounts: &[Mount], home: &Path) -> Result<()> {
         bail!("docker create failed with {status}");
     }
 
-    let status = Command::new("docker")
-        .args(["start", CONTAINER_NAME])
-        .status()
-        .context("failed to start container")?;
-
-    if !status.success() {
-        bail!("docker start failed with {status}");
-    }
+    start_container()?;
 
     info!("container '{CONTAINER_NAME}' created and started");
     Ok(())
@@ -137,6 +139,8 @@ pub fn exec_refresh() -> Result<()> {
     let status = Command::new("docker")
         .args([
             "exec",
+            "-e",
+            "DEBIAN_FRONTEND=noninteractive",
             CONTAINER_NAME,
             "bash",
             "-c",
@@ -191,11 +195,29 @@ fn container_running() -> Result<bool> {
     Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
+fn start_container() -> Result<()> {
+    let status = Command::new("docker")
+        .args(["start", CONTAINER_NAME])
+        .status()
+        .context("failed to start container")?;
+
+    if !status.success() {
+        bail!("docker start failed with {status}");
+    }
+
+    Ok(())
+}
+
+/// Ensure the container is running. If the container exists but is stopped
+/// (e.g., after a Docker daemon restart), start it automatically so the
+/// user doesn't have to care about container state.
 fn ensure_running() -> Result<()> {
+    if !container_exists()? {
+        bail!("container '{CONTAINER_NAME}' does not exist — run 'claudecage container init' first");
+    }
     if !container_running()? {
-        bail!(
-            "container '{CONTAINER_NAME}' is not running — run 'claudecage container init' first"
-        );
+        info!("container '{CONTAINER_NAME}' is stopped, starting it");
+        start_container()?;
     }
     Ok(())
 }
