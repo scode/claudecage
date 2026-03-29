@@ -12,8 +12,8 @@ and settings persist across runs.
 ```
 cargo install --path .
 claudecage image create      # build the Docker image
-claudecage                   # run claude in the current directory
-claudecage -- -p "fix the build"  # pass arguments to claude
+claudecage claude            # run claude in the current directory
+claudecage claude -- -p "fix the build"  # pass arguments to claude
 ```
 
 ## Image management
@@ -28,7 +28,7 @@ claudecage -- -p "fix the build"  # pass arguments to claude
 
 ## How it runs
 
-Each `claudecage` invocation is a `docker run --rm` — an ephemeral container
+Each `claudecage claude` invocation is a `docker run --rm` — an ephemeral container
 that is deleted when claude exits. Nothing persists inside the container except
 what's on mounted volumes. This means claude can't leave behind files or state
 that accumulate over time.
