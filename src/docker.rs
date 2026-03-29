@@ -18,7 +18,19 @@ pub fn image_exists() -> Result<bool> {
         .output()
         .context("failed to run docker image inspect")?;
 
-    Ok(output.status.success())
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    // "No such image" means the image genuinely doesn't exist.
+    // Any other failure (e.g., daemon not running) is surfaced as an error
+    // with docker's own stderr so the user sees the actual problem.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("No such image") {
+        Ok(false)
+    } else {
+        bail!("{}", stderr.trim());
+    }
 }
 
 /// Build the Docker image from the embedded Dockerfile.
