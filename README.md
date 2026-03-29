@@ -16,6 +16,7 @@ claudecage image create      # build the Docker image
 claudecage claude            # run claude in the current directory
 claudecage claude -- -p "fix the build"  # pass arguments to claude
 claudecage shell             # open a bash shell in the container
+claudecage mounts            # show what gets mounted and whether ro/rw
 ```
 
 ## Image management

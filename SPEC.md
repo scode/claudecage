@@ -51,6 +51,12 @@ All arguments after `--` are forwarded to claude verbatim.
 Open an interactive bash shell in the container. Uses the same container setup, mounts, and security restrictions as
 `claudecage claude`. No arguments are forwarded.
 
+### `claudecage mounts`
+
+Print the bind mounts that would be used for a container invocation in the current working directory. Each line shows
+the read/write mode, host path, and container path. Output is sorted by host path. When stdout is a terminal, the mode
+tag is colorized (grey for read-only, red for read-write). Does not require the Docker image to exist.
+
 ### `claudecage image create [--rebuild]`
 
 Build the Docker image if it does not already exist. If `--rebuild` is passed, rebuild the image even if it exists.
