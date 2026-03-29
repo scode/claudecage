@@ -106,6 +106,24 @@ pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Res
         }
     }
 
+    // ~/.gitconfig — read-only so git inside the container picks up the
+    // user's identity, aliases, and credential helpers.
+    let gitconfig = home.join(".gitconfig");
+    if gitconfig.exists() {
+        let gitconfig = gitconfig
+            .canonicalize()
+            .context("failed to resolve ~/.gitconfig")?;
+        if gitconfig.starts_with(&home) {
+            mounts.push(Mount {
+                container_path: remap_path(&gitconfig, &home, container_home),
+                host_path: gitconfig,
+                readonly: true,
+            });
+        } else {
+            debug!(?gitconfig, "skipping ~/.gitconfig — resolves outside home");
+        }
+    }
+
     // Resolve symlinks to find directories outside ~/.claude that need
     // mounting for the symlinks to work inside the container.
     let targets = collect_symlink_targets(&claude_dir, &home)?;
@@ -479,6 +497,72 @@ mod tests {
             .iter()
             .find(|m| m.container_path == ch.join(".leiter"));
         assert!(leiter_mount.is_none(), "expected no ~/.leiter mount");
+    }
+
+    #[test]
+    fn resolve_mounts_includes_gitconfig_readonly_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        fs::write(home.join(".gitconfig"), "[user]\n\tname = Test\n").unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let home_canonical = home.canonicalize().unwrap();
+
+        let gitconfig_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".gitconfig"));
+        assert!(gitconfig_mount.is_some(), "expected ~/.gitconfig mount");
+        let gitconfig_mount = gitconfig_mount.unwrap();
+        assert_eq!(gitconfig_mount.host_path, home_canonical.join(".gitconfig"));
+        assert!(gitconfig_mount.readonly);
+    }
+
+    #[test]
+    fn resolve_mounts_skips_gitconfig_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+
+        let gitconfig_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".gitconfig"));
+        assert!(gitconfig_mount.is_none(), "expected no ~/.gitconfig mount");
+    }
+
+    #[test]
+    fn resolve_mounts_skips_gitconfig_symlink_outside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let outside = tmp.path().join("outside-gitconfig");
+        fs::write(&outside, "[user]\n\tname = Test\n").unwrap();
+        unix_fs::symlink(&outside, home.join(".gitconfig")).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+
+        let gitconfig_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".gitconfig"));
+        assert!(
+            gitconfig_mount.is_none(),
+            "expected no ~/.gitconfig mount for symlink outside home"
+        );
     }
 
     #[test]

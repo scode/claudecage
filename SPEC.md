@@ -86,9 +86,9 @@ Build the Docker image if it does not already exist. If `--rebuild` is passed, r
 The image must include a non-root user matching the host user's uid and gid so that claude does not run as root inside
 the container.
 
-The image includes Homebrew (Linuxbrew) and installs `gh` and `leiter` via Homebrew. `gh` is configured as the git
-credential helper so that `git push` and other git operations use `GH_TOKEN` when it is set. `leiter` is a personal
-preference — a future improvement should make the set of Homebrew-installed tools configurable.
+The image includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, `rust`, and `stax` via Homebrew. `gh` is configured
+as the git credential helper so that `git push` and other git operations use `GH_TOKEN` when it is set. `leiter` is a
+personal preference — a future improvement should make the set of Homebrew-installed tools configurable.
 
 ### `claudecage image recreate`
 
@@ -122,6 +122,10 @@ Only the following host paths are visible inside the container:
 - **`~/.leiter`** (if it exists): mounted read-write. Leiter stores its soul and session logs here. Only mounted when
   the directory already exists on the host — it is not created automatically. If `~/.leiter` is a symlink, its resolved
   path must be under `$HOME` or it is silently skipped.
+
+- **`~/.gitconfig`** (if it exists): mounted read-only. Exposes the user's git identity, aliases, and credential helper
+  configuration inside the container. If `~/.gitconfig` is a symlink, its resolved path must be under `$HOME` or it is
+  silently skipped.
 
 - **Symlink targets from `~/.claude`**: top-level symlinks in `~/.claude` are resolved and their targets mounted
   read-only. This allows configurations like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json` to work
