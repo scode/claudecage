@@ -1,6 +1,23 @@
 mod common;
 
 use std::process::Command;
+use std::sync::Once;
+
+// All integration tests live in one binary so this Once synchronizes image
+// creation across tests that run in parallel within the binary.
+static BUILD_IMAGE: Once = Once::new();
+
+fn ensure_image() {
+    BUILD_IMAGE.call_once(|| {
+        let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+            .args(["image", "recreate"])
+            .status()
+            .expect("failed to run claudecage image recreate");
+        assert!(status.success(), "claudecage image recreate failed");
+    });
+}
+
+// --- docker capability tests ---
 
 /// Verify that `docker image inspect` on a nonexistent image fails with "No such image".
 ///
@@ -32,12 +49,7 @@ fn image_recreate_builds_successfully() {
         return;
     }
 
-    let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
-        .args(["image", "recreate"])
-        .status()
-        .expect("failed to run claudecage image recreate");
-
-    assert!(status.success(), "claudecage image recreate failed");
+    ensure_image();
 
     let inspect = Command::new("docker")
         .args(["image", "inspect", "claudecage:latest"])
@@ -46,7 +58,7 @@ fn image_recreate_builds_successfully() {
 
     assert!(
         inspect.status.success(),
-        "claudecage:latest should exist after image create"
+        "claudecage:latest should exist after image recreate"
     );
 }
 
@@ -60,7 +72,6 @@ fn inspect_present_image_succeeds() {
         return;
     }
 
-    // Ensure the image is present.
     let pull = Command::new("docker")
         .args(["pull", "hello-world"])
         .output()
@@ -75,5 +86,36 @@ fn inspect_present_image_succeeds() {
     assert!(
         output.status.success(),
         "docker image inspect hello-world should succeed"
+    );
+}
+
+// --- claude_auth capability tests ---
+
+/// End-to-end test: run a single-turn claude prompt inside the container.
+///
+/// Requires claude to be authenticated and the container image to exist.
+#[test]
+fn claude_responds_to_prompt() {
+    if !common::capability_enabled("claude_auth") {
+        return;
+    }
+
+    ensure_image();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+        .args(["claude", "--", "-p", "respond with exactly the word PING"])
+        .output()
+        .expect("failed to run claudecage claude");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "claude command failed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("PING"),
+        "expected PING in output, got: {stdout}"
     );
 }
