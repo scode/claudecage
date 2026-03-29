@@ -24,28 +24,26 @@ pub fn validate_github_token(token: &str) -> Result<()> {
 
 /// Store a GitHub token in the macOS Keychain, replacing any existing entry.
 ///
-/// The token never appears in process argument lists.
+/// Uses `security -i` (interactive mode via stdin) so the token value is part
+/// of the piped command text, not process argv visible in `ps`.
 pub fn store_github_token(token: &str) -> Result<()> {
     use std::io::Write;
 
     let mut child = Command::new("/usr/bin/security")
-        .args([
-            "add-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-U",
-            "-w",
-        ])
+        .arg("-i")
         .stdin(std::process::Stdio::piped())
+        // Suppressed: security -i echoes prompts/status we don't want in user output.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
-        .context("failed to run security add-generic-password")?;
+        .context("failed to run security -i")?;
 
-    // Written twice because `-w` without a value prompts for password + confirmation.
     let stdin = child.stdin.as_mut().context("failed to open stdin pipe")?;
-    writeln!(stdin, "{token}").context("failed to write token")?;
-    writeln!(stdin, "{token}").context("failed to write token confirmation")?;
+    writeln!(
+        stdin,
+        "add-generic-password -s {KEYCHAIN_SERVICE} -a {KEYCHAIN_ACCOUNT} -U -w \"{token}\""
+    )
+    .context("failed to write command")?;
     drop(child.stdin.take());
 
     let status = child.wait().context("failed to wait for security")?;
@@ -68,6 +66,9 @@ pub fn remove_github_token() -> Result<()> {
             "-a",
             KEYCHAIN_ACCOUNT,
         ])
+        // Suppressed: security dumps the deleted item's attributes to stdout.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("failed to run security delete-generic-password")?;
 
