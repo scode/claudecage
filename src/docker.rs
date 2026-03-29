@@ -37,9 +37,12 @@ pub fn build_image(no_cache: bool) -> Result<()> {
     cmd.args(["build", "-t", IMAGE_NAME, "-f"]);
     cmd.arg(&dockerfile_path);
     cmd.args([
-        "--build-arg", &format!("USERNAME={username}"),
-        "--build-arg", &format!("UID={uid}"),
-        "--build-arg", &format!("GID={gid}"),
+        "--build-arg",
+        &format!("USERNAME={username}"),
+        "--build-arg",
+        &format!("UID={uid}"),
+        "--build-arg",
+        &format!("GID={gid}"),
     ]);
     if no_cache {
         cmd.arg("--no-cache");

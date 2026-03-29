@@ -84,8 +84,12 @@ fn resolve_mounts(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
     let mounts = mounts::resolve_mounts(home, &container_home, &workdir)?;
     debug!(count = mounts.len(), "resolved mounts");
     let container_workdir = mounts::remap_path(
-        &workdir.canonicalize().context("failed to resolve working directory")?,
-        &home.canonicalize().context("failed to resolve home directory")?,
+        &workdir
+            .canonicalize()
+            .context("failed to resolve working directory")?,
+        &home
+            .canonicalize()
+            .context("failed to resolve home directory")?,
         &container_home,
     );
     Ok((mounts, container_workdir))
@@ -126,7 +130,11 @@ fn run() -> Result<ExitCode> {
         }
         Command::Claude { claude_args } => {
             let (mounts, container_workdir) = resolve_container_setup(&home)?;
-            docker::run_container(&mounts, &container_workdir, docker::Entrypoint::Claude(&claude_args))
+            docker::run_container(
+                &mounts,
+                &container_workdir,
+                docker::Entrypoint::Claude(&claude_args),
+            )
         }
         Command::Shell => {
             let (mounts, container_workdir) = resolve_container_setup(&home)?;

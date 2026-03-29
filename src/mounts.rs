@@ -35,11 +35,7 @@ pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathB
 /// Linux-conventional `/home/alice`.
 ///
 /// Bails if `~/.claude` resolves to a path outside `$HOME`.
-pub fn resolve_mounts(
-    home: &Path,
-    container_home: &Path,
-    project: &Path,
-) -> Result<Vec<Mount>> {
+pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Result<Vec<Mount>> {
     let home = home
         .canonicalize()
         .context("failed to resolve home directory")?;
@@ -154,10 +150,7 @@ fn collect_symlink_targets(dir: &Path, home: &Path) -> Result<Vec<PathBuf>> {
         let target_dir = if resolved.is_dir() {
             resolved
         } else {
-            resolved
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or(resolved)
+            resolved.parent().map(Path::to_path_buf).unwrap_or(resolved)
         };
 
         // Skip targets inside ~/.claude (already mounted rw) or outside $HOME.
@@ -464,7 +457,10 @@ mod tests {
         let leiter_mount = mounts
             .iter()
             .find(|m| m.container_path == ch.join(".leiter"));
-        assert!(leiter_mount.is_none(), "expected no ~/.leiter mount for symlink outside home");
+        assert!(
+            leiter_mount.is_none(),
+            "expected no ~/.leiter mount for symlink outside home"
+        );
     }
 
     #[test]
@@ -511,9 +507,6 @@ mod tests {
     fn deduplicate_ancestors_shared_prefix_not_ancestor() {
         let paths = vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")];
         let result = deduplicate_ancestors(paths);
-        assert_eq!(
-            result,
-            vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")]
-        );
+        assert_eq!(result, vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")]);
     }
 }
