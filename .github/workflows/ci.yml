@@ -54,3 +54,5 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - run: cargo test
+        env:
+          CLAUDECAGE_TEST_CAPABILITIES: docker
