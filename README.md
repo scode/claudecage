@@ -1,5 +1,9 @@
 # claudecage
 
+> **Early-stage personal tool.** The CLI interface and behavior may change at
+> any time without notice. The tool is opinionated and lacks configuration —
+> I'm getting the UX to where I want it before preparing it for general use.
+
 Run Claude Code with `--dangerously-skip-permissions` inside a Docker container
 so the "dangerous" part is contained.
 
