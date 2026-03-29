@@ -45,6 +45,8 @@ directories outside `$HOME` with a clear error.
 Each invocation is an ephemeral container that is removed when claude exits. No state persists inside the container
 between runs except through mounted volumes.
 
+Claude's interactive TOS prompt for bypass-permissions mode is suppressed — the container sandbox makes it redundant.
+
 All arguments after `--` are forwarded to claude verbatim.
 
 ### `claudecage shell`

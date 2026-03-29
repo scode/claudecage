@@ -101,7 +101,13 @@ pub fn run_container(
 
     match entrypoint {
         Entrypoint::Claude(claude_args) => {
-            cmd.args(["claude", "--dangerously-skip-permissions"]);
+            // Suppress the interactive TOS prompt — redundant inside a sandbox.
+            cmd.args([
+                "claude",
+                "--dangerously-skip-permissions",
+                "--settings",
+                r#"{"skipDangerousModePermissionPrompt": true}"#,
+            ]);
             cmd.args(claude_args);
         }
         Entrypoint::Shell => {
