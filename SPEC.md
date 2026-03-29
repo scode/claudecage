@@ -87,6 +87,10 @@ Only the following host paths are visible inside the container:
   does not exist. If `~/.claude` is itself a symlink, its resolved path must
   be under `$HOME` — claudecage must reject it otherwise.
 
+- **`~/.claude.json`**: mounted read-write. Claude stores configuration in
+  this file alongside the `~/.claude` directory. Created automatically (as
+  `{}`) if it does not exist.
+
 - **Symlink targets from `~/.claude`**: top-level symlinks in `~/.claude` are
   resolved and their targets mounted read-only. This allows configurations
   like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json` to work

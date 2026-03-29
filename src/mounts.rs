@@ -63,6 +63,18 @@ pub fn resolve_mounts(home: &Path, project: &Path) -> Result<Vec<Mount>> {
         readonly: false,
     });
 
+    // ~/.claude.json — read-write. Claude stores configuration here
+    // (outside ~/.claude). Create it if absent so the mount succeeds.
+    let claude_json = home.join(".claude.json");
+    if !claude_json.exists() {
+        std::fs::write(&claude_json, "{}").context("failed to create ~/.claude.json")?;
+    }
+    mounts.push(Mount {
+        host_path: claude_json.clone(),
+        container_path: claude_json,
+        readonly: false,
+    });
+
     // Resolve symlinks to find directories outside ~/.claude that need
     // mounting for the symlinks to work inside the container.
     let targets = collect_symlink_targets(&claude_dir, &home)?;
@@ -167,13 +179,15 @@ mod tests {
         let home_canonical = home.canonicalize().unwrap();
         let project_canonical = project.canonicalize().unwrap();
 
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 3);
         assert_eq!(mounts[0].host_path, project_canonical);
         assert_eq!(mounts[0].container_path, project_canonical);
         assert!(mounts[0].readonly);
         assert_eq!(mounts[1].host_path, home_canonical.join(".claude"));
         assert_eq!(mounts[1].container_path, home_canonical.join(".claude"));
         assert!(!mounts[1].readonly);
+        assert_eq!(mounts[2].host_path, home_canonical.join(".claude.json"));
+        assert!(!mounts[2].readonly);
     }
 
     #[test]
@@ -188,7 +202,8 @@ mod tests {
         let mounts = resolve_mounts(&home, &project).unwrap();
 
         assert!(home.join(".claude").exists());
-        assert_eq!(mounts.len(), 2);
+        assert!(home.join(".claude.json").exists());
+        assert_eq!(mounts.len(), 3);
     }
 
     #[test]
@@ -213,12 +228,12 @@ mod tests {
 
         let mounts = resolve_mounts(&home, &project).unwrap();
 
-        // project (ro), .claude (rw), external dir (ro).
-        assert_eq!(mounts.len(), 3);
+        // project (ro), .claude (rw), .claude.json (rw), external dir (ro).
+        assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
-        assert_eq!(mounts[2].host_path, external_canonical);
-        assert_eq!(mounts[2].container_path, external_canonical);
-        assert!(mounts[2].readonly);
+        assert_eq!(mounts[3].host_path, external_canonical);
+        assert_eq!(mounts[3].container_path, external_canonical);
+        assert!(mounts[3].readonly);
     }
 
     #[test]
@@ -238,11 +253,11 @@ mod tests {
 
         let mounts = resolve_mounts(&home, &project).unwrap();
 
-        assert_eq!(mounts.len(), 3);
+        assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
-        assert_eq!(mounts[2].host_path, external_canonical);
-        assert_eq!(mounts[2].container_path, external_canonical);
-        assert!(mounts[2].readonly);
+        assert_eq!(mounts[3].host_path, external_canonical);
+        assert_eq!(mounts[3].container_path, external_canonical);
+        assert!(mounts[3].readonly);
     }
 
     #[test]
@@ -258,7 +273,7 @@ mod tests {
         unix_fs::symlink("/nonexistent/path", claude_dir.join("broken")).unwrap();
 
         let mounts = resolve_mounts(&home, &project).unwrap();
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 3);
     }
 
     #[test]
@@ -274,7 +289,7 @@ mod tests {
         unix_fs::symlink(claude_dir.join("subdir"), claude_dir.join("link")).unwrap();
 
         let mounts = resolve_mounts(&home, &project).unwrap();
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 3);
     }
 
     #[test]
@@ -294,7 +309,7 @@ mod tests {
         unix_fs::symlink(outside.join("secrets"), claude_dir.join("secrets")).unwrap();
 
         let mounts = resolve_mounts(&home, &project).unwrap();
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 3);
     }
 
     #[test]
