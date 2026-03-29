@@ -1,3 +1,4 @@
+mod auth;
 mod docker;
 mod mounts;
 
@@ -41,6 +42,11 @@ enum Command {
         #[command(subcommand)]
         action: ImageAction,
     },
+    /// Manage credentials.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -53,6 +59,46 @@ enum ImageAction {
     },
     /// Rebuild the image from scratch (no cache).
     Recreate,
+}
+
+#[derive(Subcommand)]
+enum AuthAction {
+    /// Store a GitHub token in the macOS Keychain.
+    SetGithubToken,
+    /// Remove the stored GitHub token from the macOS Keychain.
+    RemoveGithubToken,
+}
+
+/// Read a line from stdin. When stdin is a terminal, echo is disabled to avoid
+/// leaking secrets into scrollback. When piped, reads plainly.
+fn read_secret_line() -> Result<String> {
+    let stdin = std::io::stdin();
+    let is_tty = std::io::IsTerminal::is_terminal(&stdin);
+
+    let orig = if is_tty {
+        let orig =
+            nix::sys::termios::tcgetattr(&stdin).context("failed to get terminal attributes")?;
+        let mut noecho = orig.clone();
+        noecho
+            .local_flags
+            .remove(nix::sys::termios::LocalFlags::ECHO);
+        nix::sys::termios::tcsetattr(&stdin, nix::sys::termios::SetArg::TCSANOW, &noecho)
+            .context("failed to disable terminal echo")?;
+        Some(orig)
+    } else {
+        None
+    };
+
+    let mut line = String::new();
+    let result = stdin.read_line(&mut line);
+
+    if let Some(orig) = orig {
+        let _ = nix::sys::termios::tcsetattr(&stdin, nix::sys::termios::SetArg::TCSANOW, &orig);
+        eprintln!(); // Raw newline to compensate for suppressed echo, not logging.
+    }
+
+    result.context("failed to read from stdin")?;
+    Ok(line.trim().to_string())
 }
 
 fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
@@ -128,17 +174,35 @@ fn run() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Claude { claude_args } => {
+        ref cmd @ (Command::Claude { .. } | Command::Shell) => {
             let (mounts, container_workdir) = resolve_container_setup(&home)?;
-            docker::run_container(
-                &mounts,
-                &container_workdir,
-                docker::Entrypoint::Claude(&claude_args),
-            )
+            let github_token = auth::resolve_github_token()?;
+            let env_vars: Vec<(&str, &str)> = github_token
+                .as_deref()
+                .map(|t| vec![("GH_TOKEN", t)])
+                .unwrap_or_default();
+            let entrypoint = match cmd {
+                Command::Claude { claude_args } => docker::Entrypoint::Claude(claude_args),
+                Command::Shell => docker::Entrypoint::Shell,
+                _ => unreachable!(),
+            };
+            docker::run_container(&mounts, &container_workdir, entrypoint, &env_vars)
         }
-        Command::Shell => {
-            let (mounts, container_workdir) = resolve_container_setup(&home)?;
-            docker::run_container(&mounts, &container_workdir, docker::Entrypoint::Shell)
+        Command::Auth { action } => {
+            match action {
+                AuthAction::SetGithubToken => {
+                    info!("Paste a GitHub personal access token:");
+                    let token = read_secret_line().context("failed to read token from stdin")?;
+                    auth::validate_github_token(&token)?;
+                    auth::store_github_token(&token)?;
+                    info!("token stored in macOS Keychain");
+                }
+                AuthAction::RemoveGithubToken => {
+                    auth::remove_github_token()?;
+                    info!("token removed from macOS Keychain");
+                }
+            }
+            Ok(ExitCode::SUCCESS)
         }
         Command::Mounts => {
             let (mut mounts, _) = resolve_mounts(&home)?;
@@ -167,6 +231,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(e) => {
+            // eprintln, not tracing — this runs before/outside the tracing subscriber.
             eprintln!("error: {e:#}");
             ExitCode::FAILURE
         }
