@@ -1,8 +1,11 @@
 mod docker;
 mod mounts;
 
-use anyhow::Result;
+use std::process::ExitCode;
+
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use tracing::debug;
 
 #[derive(Parser)]
 #[command(name = "claudecage")]
@@ -11,7 +14,15 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Arguments forwarded to claude.
+    /// Increase log verbosity (repeat for more: -v debug, -vv trace).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// Decrease log verbosity (repeat for less: -q warn, -qq error, -qqq off).
+    #[arg(short = 'q', long = "quiet", action = clap::ArgAction::Count, global = true)]
+    quiet: u8,
+
+    /// Arguments forwarded to claude (after --).
     #[arg(last = true)]
     claude_args: Vec<String>,
 }
@@ -39,30 +50,106 @@ enum ContainerAction {
     Auth,
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
+fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
+    const LEVELS: &[tracing::level_filters::LevelFilter] = &[
+        tracing::level_filters::LevelFilter::OFF,
+        tracing::level_filters::LevelFilter::ERROR,
+        tracing::level_filters::LevelFilter::WARN,
+        tracing::level_filters::LevelFilter::INFO,
+        tracing::level_filters::LevelFilter::DEBUG,
+        tracing::level_filters::LevelFilter::TRACE,
+    ];
+    let base: i8 = 3; // INFO
+    let idx = (base + verbose as i8 - quiet as i8).clamp(0, LEVELS.len() as i8 - 1);
+    LEVELS[idx as usize]
+}
 
+fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
+    tracing_subscriber::fmt()
+        .with_max_level(log_level(cli.verbose, cli.quiet))
+        .init();
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+
     match cli.command {
-        Some(Command::Container { action }) => match action {
-            ContainerAction::Init { rebuild: _rebuild } => {
-                anyhow::bail!("not implemented");
+        Some(Command::Container { action }) => {
+            match action {
+                ContainerAction::Init { rebuild } => {
+                    if rebuild || !docker::image_exists()? {
+                        docker::build_image()?;
+                    }
+                    let mounts = mounts::resolve_mounts(&home)?;
+                    debug!(count = mounts.len(), "resolved mounts");
+                    docker::create_container(&mounts, &home)?;
+                }
+                ContainerAction::Refresh => {
+                    docker::exec_refresh()?;
+                }
+                ContainerAction::Auth => {
+                    docker::exec_auth()?;
+                }
             }
-            ContainerAction::Refresh => {
-                anyhow::bail!("not implemented");
-            }
-            ContainerAction::Auth => {
-                anyhow::bail!("not implemented");
-            }
-        },
-        None => {
-            anyhow::bail!("not implemented");
+            Ok(ExitCode::SUCCESS)
         }
+        None => {
+            let workdir =
+                std::env::current_dir().context("could not determine working directory")?;
+            if !workdir.starts_with(&home) {
+                bail!(
+                    "working directory {} is outside the home directory — \
+                     only projects under $HOME are accessible in the container",
+                    workdir.display()
+                );
+            }
+            docker::exec_claude(&workdir, &cli.claude_args)
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing::level_filters::LevelFilter;
+
+    #[test]
+    fn log_level_defaults_to_info() {
+        assert_eq!(log_level(0, 0), LevelFilter::INFO);
+    }
+
+    #[test]
+    fn log_level_verbose_increases() {
+        assert_eq!(log_level(1, 0), LevelFilter::DEBUG);
+        assert_eq!(log_level(2, 0), LevelFilter::TRACE);
+    }
+
+    #[test]
+    fn log_level_quiet_decreases() {
+        assert_eq!(log_level(0, 1), LevelFilter::WARN);
+        assert_eq!(log_level(0, 2), LevelFilter::ERROR);
+        assert_eq!(log_level(0, 3), LevelFilter::OFF);
+    }
+
+    #[test]
+    fn log_level_clamps_at_boundaries() {
+        assert_eq!(log_level(10, 0), LevelFilter::TRACE);
+        assert_eq!(log_level(0, 10), LevelFilter::OFF);
+    }
+
+    #[test]
+    fn log_level_verbose_and_quiet_cancel() {
+        assert_eq!(log_level(1, 1), LevelFilter::INFO);
+        assert_eq!(log_level(2, 1), LevelFilter::DEBUG);
     }
 }

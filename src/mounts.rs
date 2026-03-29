@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tracing::debug;
 
 /// A bind mount to pass to `docker create`.
+#[derive(Debug)]
 pub struct Mount {
     pub host_path: PathBuf,
     pub container_path: PathBuf,
@@ -14,9 +15,13 @@ pub struct Mount {
 /// Compute all mounts needed for the claudecage container.
 ///
 /// The home directory is mounted read-only (covers all projects). `~/.claude`
-/// is mounted read-write on top of it so session state persists. Any symlink
-/// targets reachable from `~/.claude` are mounted read-only at their real
-/// host paths so the symlinks resolve identically inside the container.
+/// is created if absent and mounted read-write on top of it so session state
+/// persists. Top-level symlinks in `~/.claude` are resolved and their targets
+/// mounted read-only at the same host paths, so those symlinks work identically
+/// inside the container. Nested symlinks (in subdirectories of `~/.claude`) are
+/// not followed.
+///
+/// Bails if `~/.claude` resolves to a path outside `$HOME`.
 pub fn resolve_mounts(home: &Path) -> Result<Vec<Mount>> {
     let home = home
         .canonicalize()
@@ -32,36 +37,49 @@ pub fn resolve_mounts(home: &Path) -> Result<Vec<Mount>> {
         readonly: true,
     });
 
-    // ~/.claude — read-write, overrides the read-only home mount.
-    if claude_dir.is_dir() {
-        let claude_dir = claude_dir
-            .canonicalize()
-            .context("failed to resolve ~/.claude")?;
-        mounts.push(Mount {
-            host_path: claude_dir.clone(),
-            container_path: claude_dir.clone(),
-            readonly: false,
-        });
+    // Ensure ~/.claude exists so auth and session state can be persisted.
+    if !claude_dir.exists() {
+        std::fs::create_dir(&claude_dir).context("failed to create ~/.claude")?;
+    }
 
-        // Resolve symlinks to find external directories that need mounting.
-        let targets = collect_symlink_targets(&claude_dir, &home)?;
-        let deduped = deduplicate_ancestors(targets);
-        for target in deduped {
-            debug!(?target, "mounting symlink target");
-            mounts.push(Mount {
-                host_path: target.clone(),
-                container_path: target,
-                readonly: true,
-            });
-        }
+    // ~/.claude — read-write, overrides the read-only home mount.
+    // Validate that the resolved path is still under $HOME (could be a
+    // symlink to somewhere else). Same variable used for the check and
+    // the mount to prevent drift.
+    let claude_dir = claude_dir
+        .canonicalize()
+        .context("failed to resolve ~/.claude")?;
+    if !claude_dir.starts_with(&home) {
+        bail!(
+            "~/.claude resolves to {} which is outside the home directory",
+            claude_dir.display()
+        );
+    }
+    mounts.push(Mount {
+        host_path: claude_dir.clone(),
+        container_path: claude_dir.clone(),
+        readonly: false,
+    });
+
+    // Resolve symlinks to find external directories that need mounting.
+    let targets = collect_symlink_targets(&claude_dir, &home)?;
+    let deduped = deduplicate_ancestors(targets);
+    for target in deduped {
+        debug!(?target, "mounting symlink target");
+        mounts.push(Mount {
+            host_path: target.clone(),
+            container_path: target,
+            readonly: true,
+        });
     }
 
     Ok(mounts)
 }
 
-/// Walk top-level entries in a directory and resolve any symlinks to their
-/// canonical target directories. Broken symlinks and targets outside `home`
-/// are silently skipped — the latter prevents a compromised container from
+/// Walk top-level entries in a directory and resolve symlinks. File symlinks
+/// resolve to their parent directory; directory symlinks resolve to the
+/// directory itself. Broken symlinks and targets outside `home` are skipped
+/// with a debug log — the latter prevents a compromised container from
 /// crafting symlinks that expose arbitrary host paths on the next init.
 fn collect_symlink_targets(dir: &Path, home: &Path) -> Result<Vec<PathBuf>> {
     let mut targets = Vec::new();
@@ -152,16 +170,21 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mounts_without_claude_dir() {
+    fn resolve_mounts_creates_claude_dir_if_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
 
+        assert!(!home.join(".claude").exists());
         let mounts = resolve_mounts(home).unwrap();
         let home_canonical = home.canonicalize().unwrap();
 
-        assert_eq!(mounts.len(), 1);
+        // ~/.claude should have been created and mounted rw.
+        assert!(home.join(".claude").exists());
+        assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[0].host_path, home_canonical);
         assert!(mounts[0].readonly);
+        assert_eq!(mounts[1].host_path, home_canonical.join(".claude"));
+        assert!(!mounts[1].readonly);
     }
 
     #[test]
@@ -209,6 +232,7 @@ mod tests {
         assert_eq!(mounts.len(), 3);
         let external_canonical = external.canonicalize().unwrap();
         assert_eq!(mounts[2].host_path, external_canonical);
+        assert_eq!(mounts[2].container_path, external_canonical);
         assert!(mounts[2].readonly);
     }
 
@@ -260,6 +284,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_mounts_rejects_claude_dir_symlink_outside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+
+        // ~/.claude is a symlink pointing outside $HOME.
+        unix_fs::symlink(&outside, home.join(".claude")).unwrap();
+
+        let err = resolve_mounts(&home).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the home directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn deduplicate_ancestors_removes_subdirs() {
         let paths = vec![
             PathBuf::from("/a/b/c"),
@@ -270,5 +313,29 @@ mod tests {
         let result = deduplicate_ancestors(paths);
 
         assert_eq!(result, vec![PathBuf::from("/a/b"), PathBuf::from("/x/y")]);
+    }
+
+    #[test]
+    fn deduplicate_ancestors_empty_input() {
+        assert!(deduplicate_ancestors(vec![]).is_empty());
+    }
+
+    #[test]
+    fn deduplicate_ancestors_single_path() {
+        let result = deduplicate_ancestors(vec![PathBuf::from("/a/b")]);
+        assert_eq!(result, vec![PathBuf::from("/a/b")]);
+    }
+
+    #[test]
+    fn deduplicate_ancestors_shared_prefix_not_ancestor() {
+        // /a/bc is NOT a subdirectory of /a/b — Path::starts_with is component-based.
+        let paths = vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")];
+
+        let result = deduplicate_ancestors(paths);
+
+        assert_eq!(
+            result,
+            vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")]
+        );
     }
 }
