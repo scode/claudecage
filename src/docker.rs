@@ -83,7 +83,8 @@ fn write_env_file(writer: &mut impl Write, env_vars: &[(&str, &str)]) -> Result<
 
 pub enum Entrypoint<'a> {
     Claude(&'a [String]),
-    Shell,
+    Shell(&'a [String]),
+    Run(&'a str),
 }
 
 /// Run an ephemeral container with the given mounts and working directory.
@@ -166,8 +167,12 @@ pub fn run_container(
             ]);
             cmd.args(claude_args);
         }
-        Entrypoint::Shell => {
+        Entrypoint::Shell(shell_args) => {
             cmd.arg("bash");
+            cmd.args(shell_args);
+        }
+        Entrypoint::Run(command) => {
+            cmd.args(["bash", "-c", command]);
         }
     }
 

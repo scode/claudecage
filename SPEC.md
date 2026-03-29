@@ -49,10 +49,15 @@ Claude's interactive TOS prompt for bypass-permissions mode is suppressed — th
 
 All arguments after `--` are forwarded to claude verbatim.
 
-### `claudecage shell`
+### `claudecage shell [-- shell-args...]`
 
 Open an interactive bash shell in the container. Uses the same container setup, mounts, and security restrictions as
-`claudecage claude`. No arguments are forwarded.
+`claudecage claude`. All arguments after `--` are forwarded to bash verbatim.
+
+### `claudecage run <command...>`
+
+Run a command in the container via `bash -c`. Uses the same container setup, mounts, and security restrictions as
+`claudecage claude`. All arguments are joined with spaces and passed as a single string to `bash -c`.
 
 ### `claudecage mounts`
 

@@ -34,7 +34,16 @@ enum Command {
         claude_args: Vec<String>,
     },
     /// Open an interactive shell in the container.
-    Shell,
+    Shell {
+        /// Arguments forwarded to bash (after --).
+        #[arg(last = true)]
+        shell_args: Vec<String>,
+    },
+    /// Run a command in the container via bash -c.
+    Run {
+        /// The command string to pass to bash -c.
+        command: String,
+    },
     /// Show what mounts would be created in the container.
     Mounts,
     /// Manage the claudecage Docker image.
@@ -174,7 +183,7 @@ fn run() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        ref cmd @ (Command::Claude { .. } | Command::Shell) => {
+        ref cmd @ (Command::Claude { .. } | Command::Shell { .. } | Command::Run { .. }) => {
             let (mounts, container_workdir) = resolve_container_setup(&home)?;
             let github_token = auth::resolve_github_token()?;
             let env_vars: Vec<(&str, &str)> = github_token
@@ -183,7 +192,9 @@ fn run() -> Result<ExitCode> {
                 .unwrap_or_default();
             let entrypoint = match cmd {
                 Command::Claude { claude_args } => docker::Entrypoint::Claude(claude_args),
-                Command::Shell => docker::Entrypoint::Shell,
+                Command::Shell { shell_args } => docker::Entrypoint::Shell(shell_args),
+                Command::Run { command } => docker::Entrypoint::Run(command),
+
                 _ => unreachable!(),
             };
             docker::run_container(&mounts, &container_workdir, entrypoint, &env_vars)
