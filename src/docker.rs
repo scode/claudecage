@@ -43,9 +43,10 @@ pub fn build_image() -> Result<()> {
 
 /// Create the claudecage container with the given mounts and start it.
 ///
-/// The container runs `sleep infinity` as its main process so it stays
-/// alive for `docker exec` invocations. Capabilities are dropped to
-/// reduce the attack surface.
+/// Removes any existing container first so init is idempotent. Creates a
+/// non-root user inside the container matching the host user's uid/gid so
+/// that claude doesn't refuse to run (it rejects root). Capabilities are
+/// dropped to reduce the attack surface.
 pub fn create_container(mounts: &[Mount], home: &Path) -> Result<()> {
     if container_exists()? {
         info!("removing existing container '{CONTAINER_NAME}'");
@@ -102,9 +103,53 @@ pub fn create_container(mounts: &[Mount], home: &Path) -> Result<()> {
     }
 
     start_container()?;
+    setup_container_user(home_str)?;
 
     info!("container '{CONTAINER_NAME}' created and started");
     Ok(())
+}
+
+/// Create a user inside the container matching the host user.
+///
+/// Claude refuses to run as root, so we need a non-root user with the
+/// same uid/gid as the host user. This runs as root (the container's
+/// default) to create the user, then all subsequent claude invocations
+/// use --user.
+fn setup_container_user(home: &str) -> Result<()> {
+    let uid = nix::unistd::getuid().as_raw();
+    let gid = nix::unistd::getgid().as_raw();
+    let username = std::env::var("USER").context("USER environment variable not set")?;
+
+    info!("creating container user {username} (uid={uid}, gid={gid})");
+
+    let setup_script = format!(
+        "groupadd -g {gid} {username} 2>/dev/null; \
+         useradd -u {uid} -g {gid} -d {home} -s /bin/bash {username}",
+    );
+
+    let status = Command::new("docker")
+        .args([
+            "exec",
+            CONTAINER_NAME,
+            "bash",
+            "-c",
+            &setup_script,
+        ])
+        .status()
+        .context("failed to create container user")?;
+
+    if !status.success() {
+        bail!("failed to create user '{username}' in container");
+    }
+
+    Ok(())
+}
+
+/// The --user flag for docker exec, matching the host user.
+fn user_flag() -> Result<String> {
+    let uid = nix::unistd::getuid().as_raw();
+    let gid = nix::unistd::getgid().as_raw();
+    Ok(format!("{uid}:{gid}"))
 }
 
 /// Execute claude inside the container with the given working directory and args.
@@ -115,9 +160,12 @@ pub fn exec_claude(workdir: &Path, claude_args: &[String]) -> Result<ExitCode> {
         .to_str()
         .context("working directory is not valid UTF-8")?;
 
+    let user = user_flag()?;
     let mut args = vec![
         "exec",
         "-it",
+        "--user",
+        &user,
         "-w",
         workdir_str,
         CONTAINER_NAME,
@@ -138,6 +186,7 @@ pub fn exec_claude(workdir: &Path, claude_args: &[String]) -> Result<ExitCode> {
 }
 
 /// Update packages and claude inside the running container.
+/// Runs as root since apt/npm require it.
 pub fn exec_refresh() -> Result<()> {
     ensure_running()?;
 
@@ -167,8 +216,9 @@ pub fn exec_refresh() -> Result<()> {
 pub fn exec_auth() -> Result<()> {
     ensure_running()?;
 
+    let user = user_flag()?;
     let status = Command::new("docker")
-        .args(["exec", "-it", CONTAINER_NAME, "claude", "login"])
+        .args(["exec", "-it", "--user", &user, CONTAINER_NAME, "claude", "login"])
         .status()
         .context("failed to run claude login")?;
 
