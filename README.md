@@ -3,6 +3,10 @@
 > **Early-stage personal tool.** The CLI interface and behavior may change at any time without notice. The tool is
 > opinionated and lacks configuration — I'm getting the UX to where I want it before preparing it for general use.
 
+> **This is not a complete security sandbox.** The container limits accidental damage but does not prevent a compromised
+> or manipulated agent from exfiltrating credentials (including your Claude OAuth token and GitHub PAT) or modifying
+> project files maliciously. See [docs/security.md](docs/security.md) for the full threat model and known risk vectors.
+
 Run Claude Code with `--dangerously-skip-permissions` inside a Docker container so the "dangerous" part is contained.
 
 Your project directory is mounted read-write so Claude can modify code. `~/.claude` is mounted read-write so auth,
@@ -91,12 +95,7 @@ The intent is to let claude run with full permissions in an environment where "f
 
 Symlink targets from `~/.claude` are validated to be under `$HOME`. Because `~/.claude` is writable, a process inside
 the container could create symlinks pointing to other directories under `$HOME`, which would become visible read-only on
-the next run. See SPEC.md for the full security model and known gaps.
-
-This is not a hardened security boundary. Docker Desktop on macOS runs containers in a VM, which provides reasonable
-isolation, but this tool is designed for convenience rather than adversarial containment. The main protection is against
-claude accidentally running destructive commands on your host filesystem, and against credential exfiltration from paths
-outside the project and `~/.claude`.
+the next run. See [docs/security.md](docs/security.md) for the full threat model and known risk vectors.
 
 ## Limitations
 
