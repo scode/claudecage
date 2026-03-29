@@ -1,7 +1,7 @@
 mod docker;
 mod mounts;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
@@ -32,6 +32,8 @@ enum Command {
         #[arg(last = true)]
         claude_args: Vec<String>,
     },
+    /// Open an interactive shell in the container.
+    Shell,
     /// Manage the claudecage Docker image.
     Image {
         #[command(subcommand)]
@@ -65,6 +67,32 @@ fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
     LEVELS[idx as usize]
 }
 
+/// Check that the image exists and the working directory is under $HOME,
+/// then resolve mounts and the container working directory.
+fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
+    if !docker::image_exists()? {
+        bail!("image not found — run 'claudecage image create' first");
+    }
+    let workdir = std::env::current_dir().context("could not determine working directory")?;
+    if !workdir.starts_with(home) {
+        bail!(
+            "working directory {} is outside the home directory — \
+             only projects under $HOME are accessible in the container",
+            workdir.display()
+        );
+    }
+    let username = std::env::var("USER").context("USER environment variable not set")?;
+    let container_home = PathBuf::from(format!("/home/{username}"));
+    let mounts = mounts::resolve_mounts(home, &container_home, &workdir)?;
+    debug!(count = mounts.len(), "resolved mounts");
+    let container_workdir = mounts::remap_path(
+        &workdir.canonicalize().context("failed to resolve working directory")?,
+        &home.canonicalize().context("failed to resolve home directory")?,
+        &container_home,
+    );
+    Ok((mounts, container_workdir))
+}
+
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
@@ -91,29 +119,12 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Claude { claude_args } => {
-            if !docker::image_exists()? {
-                bail!("image not found — run 'claudecage image create' first");
-            }
-            let workdir =
-                std::env::current_dir().context("could not determine working directory")?;
-            if !workdir.starts_with(&home) {
-                bail!(
-                    "working directory {} is outside the home directory — \
-                     only projects under $HOME are accessible in the container",
-                    workdir.display()
-                );
-            }
-            let username =
-                std::env::var("USER").context("USER environment variable not set")?;
-            let container_home = PathBuf::from(format!("/home/{username}"));
-            let mounts = mounts::resolve_mounts(&home, &container_home, &workdir)?;
-            debug!(count = mounts.len(), "resolved mounts");
-            let container_workdir = mounts::remap_path(
-                &workdir.canonicalize().context("failed to resolve working directory")?,
-                &home.canonicalize().context("failed to resolve home directory")?,
-                &container_home,
-            );
-            docker::run_claude(&mounts, &container_workdir, &claude_args)
+            let (mounts, container_workdir) = resolve_container_setup(&home)?;
+            docker::run_container(&mounts, &container_workdir, docker::Entrypoint::Claude(&claude_args))
+        }
+        Command::Shell => {
+            let (mounts, container_workdir) = resolve_container_setup(&home)?;
+            docker::run_container(&mounts, &container_workdir, docker::Entrypoint::Shell)
         }
     }
 }

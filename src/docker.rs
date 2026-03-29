@@ -55,11 +55,16 @@ pub fn build_image(no_cache: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run claude in an ephemeral container with the given mounts and working directory.
-pub fn run_claude(
+pub enum Entrypoint<'a> {
+    Claude(&'a [String]),
+    Shell,
+}
+
+/// Run an ephemeral container with the given mounts and working directory.
+pub fn run_container(
     mounts: &[Mount],
     workdir: &Path,
-    claude_args: &[String],
+    entrypoint: Entrypoint<'_>,
 ) -> Result<ExitCode> {
     let workdir_str = workdir
         .to_str()
@@ -93,8 +98,16 @@ pub fn run_claude(
 
     cmd.args(["-w", workdir_str]);
     cmd.arg(IMAGE_NAME);
-    cmd.args(["claude", "--dangerously-skip-permissions"]);
-    cmd.args(claude_args);
+
+    match entrypoint {
+        Entrypoint::Claude(claude_args) => {
+            cmd.args(["claude", "--dangerously-skip-permissions"]);
+            cmd.args(claude_args);
+        }
+        Entrypoint::Shell => {
+            cmd.arg("bash");
+        }
+    }
 
     debug!(?cmd, "docker run");
 

@@ -57,6 +57,12 @@ volumes.
 
 All arguments after `--` are forwarded to claude verbatim.
 
+### `claudecage shell`
+
+Open an interactive bash shell in the container. Uses the same container
+setup, mounts, and security restrictions as `claudecage claude`. No arguments
+are forwarded.
+
 ### `claudecage image create [--rebuild]`
 
 Build the Docker image if it does not already exist. If `--rebuild` is passed,
