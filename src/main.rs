@@ -29,25 +29,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Manage the claudecage container.
-    Container {
+    /// Manage the claudecage Docker image.
+    Image {
         #[command(subcommand)]
-        action: ContainerAction,
+        action: ImageAction,
     },
 }
 
 #[derive(Subcommand)]
-enum ContainerAction {
-    /// Build the Docker image and create the container.
-    Init {
+enum ImageAction {
+    /// Build the Docker image.
+    Create {
         /// Rebuild the image even if it already exists.
         #[arg(long)]
         rebuild: bool,
     },
-    /// Update packages and claude inside the container.
-    Refresh,
-    /// Run the Claude subscription auth flow inside the container.
-    Auth,
+    /// Rebuild the image from scratch (no cache).
+    Recreate,
 }
 
 fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
@@ -74,26 +72,23 @@ fn run() -> Result<ExitCode> {
     let home = dirs::home_dir().context("could not determine home directory")?;
 
     match cli.command {
-        Some(Command::Container { action }) => {
+        Some(Command::Image { action }) => {
             match action {
-                ContainerAction::Init { rebuild } => {
+                ImageAction::Create { rebuild } => {
                     if rebuild || !docker::image_exists()? {
-                        docker::build_image()?;
+                        docker::build_image(false)?;
                     }
-                    let mounts = mounts::resolve_mounts(&home)?;
-                    debug!(count = mounts.len(), "resolved mounts");
-                    docker::create_container(&mounts, &home)?;
                 }
-                ContainerAction::Refresh => {
-                    docker::exec_refresh()?;
-                }
-                ContainerAction::Auth => {
-                    docker::exec_auth()?;
+                ImageAction::Recreate => {
+                    docker::build_image(true)?;
                 }
             }
             Ok(ExitCode::SUCCESS)
         }
         None => {
+            if !docker::image_exists()? {
+                bail!("image not found — run 'claudecage image create' first");
+            }
             let workdir =
                 std::env::current_dir().context("could not determine working directory")?;
             if !workdir.starts_with(&home) {
@@ -103,7 +98,9 @@ fn run() -> Result<ExitCode> {
                     workdir.display()
                 );
             }
-            docker::exec_claude(&workdir, &cli.claude_args)
+            let mounts = mounts::resolve_mounts(&home, &workdir)?;
+            debug!(count = mounts.len(), "resolved mounts");
+            docker::run_claude(&mounts, &workdir, &cli.claude_args)
         }
     }
 }
