@@ -1,3 +1,32 @@
+//! Integration tests gated by `CLAUDECAGE_TEST_CAPABILITIES`.
+//!
+//! # Capabilities
+//!
+//! - `docker` — Docker daemon is available. Tests that need a pre-built claudecage
+//!   image assume one already exists (e.g., from a prior `claudecage image create`).
+//!   Use this when iterating locally to skip the slow image build.
+//!
+//! - `docker_build` — Implies `docker`. Enables the image build test, which runs
+//!   `claudecage image recreate` (a full no-cache build). Other tests that need the
+//!   image will also trigger a build via `ensure_image()` when this capability is set.
+//!   Use this in CI or when you need to verify the Dockerfile itself.
+//!
+//! - `claude_auth` — Claude is authenticated inside the container (requires prior
+//!   `/login`). The image must already exist or `docker_build` must also be set.
+//!
+//! # Examples
+//!
+//! ```sh
+//! # Fast local iteration: skip image build, assume image exists
+//! CLAUDECAGE_TEST_CAPABILITIES=docker cargo test
+//!
+//! # Full CI run: build image from scratch, then run docker tests
+//! CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build cargo test
+//!
+//! # Everything including end-to-end claude test
+//! CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build,claude_auth cargo test
+//! ```
+
 mod common;
 
 use std::process::Command;
@@ -7,14 +36,17 @@ use std::sync::Once;
 // creation across tests that run in parallel within the binary.
 static BUILD_IMAGE: Once = Once::new();
 
+/// Build the image if `docker_build` is enabled, otherwise assume it exists.
 fn ensure_image() {
-    BUILD_IMAGE.call_once(|| {
-        let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
-            .args(["image", "recreate"])
-            .status()
-            .expect("failed to run claudecage image recreate");
-        assert!(status.success(), "claudecage image recreate failed");
-    });
+    if common::capability_enabled("docker_build") {
+        BUILD_IMAGE.call_once(|| {
+            let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+                .args(["image", "recreate"])
+                .status()
+                .expect("failed to run claudecage image recreate");
+            assert!(status.success(), "claudecage image recreate failed");
+        });
+    }
 }
 
 // --- docker capability tests ---
@@ -42,10 +74,15 @@ fn inspect_missing_image_reports_no_such_image() {
     );
 }
 
+// --- docker_build capability tests ---
+
 /// Build the claudecage Docker image from scratch and verify it exists afterward.
+///
+/// Only runs with the `docker_build` capability — skipped during fast local iteration
+/// where the image is assumed to already exist.
 #[test]
 fn image_recreate_builds_successfully() {
-    if !common::capability_enabled("docker") {
+    if !common::capability_enabled("docker_build") {
         return;
     }
 
@@ -93,7 +130,8 @@ fn inspect_present_image_succeeds() {
 
 /// End-to-end test: run a single-turn claude prompt inside the container.
 ///
-/// Requires claude to be authenticated and the container image to exist.
+/// Requires claude to be authenticated and the container image to exist
+/// (either pre-built or via `docker_build` capability).
 #[test]
 fn claude_responds_to_prompt() {
     if !common::capability_enabled("claude_auth") {
@@ -102,20 +140,32 @@ fn claude_responds_to_prompt() {
 
     ensure_image();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+    // Three things must be right here or the test hangs:
+    //
+    // 1. Must use `claudecage claude`, not `claudecage run`. `claudecage claude`
+    //    adds --dangerously-skip-permissions and --settings to suppress the TOS
+    //    prompt. Without these flags, claude shows an interactive workspace trust
+    //    dialog that blocks forever when stdin is /dev/null.
+    //
+    // 2. All stdio must be Stdio::null(). Cargo test captures stdout via a pipe.
+    //    claudecage uses cmd.status() for docker, which inherits the parent's
+    //    file descriptors. If stdout/stderr are cargo's pipes and a subprocess
+    //    inside the container inherits those fds and outlives docker, the pipe
+    //    never gets EOF and .output() (or even .status() with inherited pipes)
+    //    hangs forever.
+    //
+    // 3. claudecage must not pass -i or -it to docker when stdin is not a TTY.
+    //    Docker's -i flag keeps the container's stdin open. If nothing closes it
+    //    (because the parent's stdin is a pipe that cargo holds open), the
+    //    container never exits. With Stdio::null(), claudecage sees stdin is not
+    //    a TTY and omits -i entirely.
+    let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
         .args(["claude", "--", "-p", "respond with exactly the word PING"])
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
         .expect("failed to run claudecage claude");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        output.status.success(),
-        "claude command failed.\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        stdout.contains("PING"),
-        "expected PING in output, got: {stdout}"
-    );
+    assert!(status.success(), "claude -p failed with {status}");
 }

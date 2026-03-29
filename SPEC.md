@@ -209,8 +209,8 @@ These are areas where the current behavior is acceptable but could be improved:
 - **Localhost network access.** The container can reach localhost, potentially bypassing host-side access controls.
   Restricting this is a future improvement.
 
-- **TTY detection.** The container allocates a TTY (`-it`) only when stdin is a terminal. When stdin is piped, the
-  container runs without a TTY (`-i` only), enabling scripted and non-interactive use.
+- **TTY detection.** The container allocates a TTY (`-it`) only when stdin is a terminal. When stdin is not a terminal,
+  neither `-i` nor `-t` is passed, enabling scripted and non-interactive use.
 
 - **Symlink-based mount expansion.** A session can create symlinks in `~/.claude` pointing to directories under `$HOME`
   (e.g., `~/.ssh`), causing those directories to become visible read-only on the next run. This is an accepted

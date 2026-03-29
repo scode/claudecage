@@ -111,13 +111,16 @@ outside the project and `~/.claude`.
 `cargo test` runs unit tests only. Integration tests require external infrastructure and are gated by the
 `CLAUDECAGE_TEST_CAPABILITIES` environment variable, which takes a comma-separated list of capabilities:
 
-- `docker` — Docker daemon is available
-- `claude_auth` — Claude is authenticated inside the container (requires prior `/login` — see Quickstart) and the
-  container image exists
+- `docker` — Docker daemon is available. Assumes the claudecage image already exists (for fast local iteration).
+- `docker_build` — Implies `docker`. Enables the image build test (`image recreate`) and builds the image for any test
+  that needs it. Use this in CI or when verifying Dockerfile changes.
+- `claude_auth` — Claude is authenticated inside the container (requires prior `/login` — see Quickstart). The image
+  must already exist or `docker_build` must also be set.
 
 ```
-CLAUDECAGE_TEST_CAPABILITIES=docker cargo test
-CLAUDECAGE_TEST_CAPABILITIES=docker,claude_auth cargo test
+CLAUDECAGE_TEST_CAPABILITIES=docker cargo test                        # fast: skip image build
+CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build cargo test           # full: build image first
+CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build,claude_auth cargo test  # everything
 ```
 
 Without the variable set, integration tests are silently skipped.
