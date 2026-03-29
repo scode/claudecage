@@ -71,9 +71,11 @@ The intent is to let claude run with full permissions in an environment where
 - **Bind mount syntax**: uses `--mount type=bind,...` instead of `-v` to avoid
   ambiguity with colons in paths.
 
-Symlink targets from `~/.claude` are validated to be under `$HOME`. A process
-inside the container cannot craft symlinks in `~/.claude` to expose paths
-outside the home directory on the next run.
+Symlink targets from `~/.claude` are validated to be under `$HOME`. Because
+`~/.claude` is writable, a process inside the container could create symlinks
+pointing to other directories under `$HOME`, which would become visible
+read-only on the next run. See SPEC.md for the full security model and known
+gaps.
 
 This is not a hardened security boundary. Docker Desktop on macOS runs containers
 in a VM, which provides reasonable isolation, but this tool is designed for
