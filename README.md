@@ -14,6 +14,7 @@ optionally be injected as an environment variable for PR access (see Quickstart)
 ```
 cargo install --path .
 claudecage image create      # build the Docker image
+claudecage claude            # first run: type /login and complete the browser OAuth flow
 claudecage claude            # run claude in the current directory
 claudecage claude -- -p "fix the build"  # pass arguments to claude
 claudecage shell             # open a bash shell in the container
@@ -21,6 +22,12 @@ claudecage mounts            # show what gets mounted and whether ro/rw
 claudecage auth set-github-token     # store a GitHub PAT for PR access
 claudecage auth remove-github-token  # remove the stored token
 ```
+
+The container runs Linux, so Claude Code stores its OAuth credential in `~/.claude/.credentials.json` (not the macOS
+Keychain). On first run, type `/login` inside claude and complete the browser-based OAuth flow. The credential persists
+across runs via the `~/.claude` mount. Note that this creates `~/.claude/.credentials.json` on the host — it contains a
+bearer token and should be treated like a password. This is an inherent consequence of `~/.claude` being mounted
+read-write.
 
 ## GitHub access (optional)
 
@@ -105,7 +112,8 @@ outside the project and `~/.claude`.
 `CLAUDECAGE_TEST_CAPABILITIES` environment variable, which takes a comma-separated list of capabilities:
 
 - `docker` — Docker daemon is available
-- `claude_auth` — Claude is authenticated and the container image exists (end-to-end test)
+- `claude_auth` — Claude is authenticated inside the container (requires prior `/login` — see Quickstart) and the
+  container image exists
 
 ```
 CLAUDECAGE_TEST_CAPABILITIES=docker cargo test

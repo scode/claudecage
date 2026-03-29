@@ -111,7 +111,10 @@ Only the following host paths are visible inside the container:
 
 - **`~/.claude`**: mounted read-write. This is where auth tokens, session state, conversation history, and settings
   live. Created automatically if it does not exist. If `~/.claude` is itself a symlink, its resolved path must be under
-  `$HOME` — claudecage must reject it otherwise.
+  `$HOME` — claudecage must reject it otherwise. Because the container runs Linux, Claude Code stores its OAuth
+  credential in `~/.claude/.credentials.json` (rather than the macOS Keychain). This file is created on the host when
+  the user authenticates inside the container via `/login`, and contains a bearer token that should be treated like a
+  password.
 
 - **`~/.claude.json`**: mounted read-write. Claude stores configuration in this file alongside the `~/.claude`
   directory. Created automatically (as `{}`) if it does not exist.
