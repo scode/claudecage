@@ -104,8 +104,6 @@ pub fn run_container(
     cmd.args(["run", "--rm"]);
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         cmd.arg("-it");
-    } else {
-        cmd.arg("-i");
     }
     cmd.args(["--cap-drop=ALL", "--security-opt=no-new-privileges"]);
 
