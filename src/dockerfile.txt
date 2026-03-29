@@ -1,5 +1,10 @@
 FROM ubuntu:24.04
 
+ARG USERNAME
+ARG UID
+ARG GID
+ARG USER_HOME
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -10,3 +15,9 @@ RUN apt-get update \
     && npm install -g @anthropic-ai/claude-code@latest \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g ${GID} ${USERNAME} 2>/dev/null; \
+    userdel -f $(id -nu ${UID} 2>/dev/null) 2>/dev/null; \
+    useradd -u ${UID} -g ${GID} -d ${USER_HOME} -s /bin/bash -o ${USERNAME}
+
+USER ${USERNAME}
