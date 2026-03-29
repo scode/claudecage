@@ -32,7 +32,8 @@ ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}
 RUN brew install gh scode/dist-tap/leiter
 
 # Configure gh as git credential helper so git push uses GH_TOKEN when set.
-RUN gh auth setup-git
+# Written directly because `gh auth setup-git` requires an authenticated session.
+RUN git config --global credential.https://github.com.helper '!/home/linuxbrew/.linuxbrew/bin/gh auth git-credential'
 
 # Remove temporary sudo grant
 USER root
