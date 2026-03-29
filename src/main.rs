@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use tracing::debug;
+use tracing::{debug, info};
 
 #[derive(Parser)]
 #[command(name = "claudecage")]
@@ -77,6 +77,8 @@ fn run() -> Result<ExitCode> {
                 ImageAction::Create { rebuild } => {
                     if rebuild || !docker::image_exists()? {
                         docker::build_image(false)?;
+                    } else {
+                        info!("image already exists (use 'claudecage image recreate' to rebuild from scratch)");
                     }
                 }
                 ImageAction::Recreate => {
