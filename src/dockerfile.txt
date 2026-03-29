@@ -27,9 +27,15 @@ RUN groupadd -g ${GID} ${USERNAME} 2>/dev/null; \
 # Install Homebrew as non-root user (needs sudo for /home/linuxbrew ownership)
 USER ${USERNAME}
 RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
+    LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install gh scode/dist-tap/leiter
+RUN brew install gh scode/dist-tap/leiter rust
+
+# TODO: stax v0.37.0 lacks linux-aarch64 binaries. The release after v0.37.0
+# should include them — replace this clone-and-build with `brew install scode/dist-tap/stax`.
+RUN cargo install --git https://github.com/cesarferreira/stax.git --tag v0.37.0 \
+    && ln -s ~/.cargo/bin/stax /home/linuxbrew/.linuxbrew/bin/stax
 
 # Configure gh as git credential helper so git push uses GH_TOKEN when set.
 # Written directly because `gh auth setup-git` requires an authenticated session.
