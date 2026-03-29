@@ -37,12 +37,19 @@ RUN brew install gh scode/dist-tap/leiter rust
 RUN cargo install --git https://github.com/cesarferreira/stax.git --tag v0.37.0 \
     && ln -s ~/.cargo/bin/stax /home/linuxbrew/.linuxbrew/bin/stax
 
-# Configure gh as git credential helper so git push uses GH_TOKEN when set.
-# Written directly because `gh auth setup-git` requires an authenticated session.
-RUN git config --global credential.https://github.com.helper '!/home/linuxbrew/.linuxbrew/bin/gh auth git-credential'
-
-# Remove temporary sudo grant
+# Remove temporary sudo grant and configure system-level git settings.
 USER root
 RUN rm /etc/sudoers.d/brew-install
+
+# Configure gh as git credential helper so git push works via GH_TOKEN
+# without user setup. Written directly because `gh auth setup-git` requires
+# an authenticated session.
+#
+# This must be --system (not --global) because the host's ~/.gitconfig is
+# bind-mounted read-only into the container at runtime (so git picks up the
+# user's identity and aliases). That mount shadows the image's ~/.gitconfig,
+# which is where --global writes. System config (/etc/gitconfig) is not
+# shadowed and takes effect alongside the mounted user config.
+RUN git config --system credential.https://github.com.helper '!/home/linuxbrew/.linuxbrew/bin/gh auth git-credential'
 
 USER ${USERNAME}
