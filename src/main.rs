@@ -1,6 +1,7 @@
 mod docker;
 mod mounts;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
@@ -102,9 +103,17 @@ fn run() -> Result<ExitCode> {
                     workdir.display()
                 );
             }
-            let mounts = mounts::resolve_mounts(&home, &workdir)?;
+            let username =
+                std::env::var("USER").context("USER environment variable not set")?;
+            let container_home = PathBuf::from(format!("/home/{username}"));
+            let mounts = mounts::resolve_mounts(&home, &container_home, &workdir)?;
             debug!(count = mounts.len(), "resolved mounts");
-            docker::run_claude(&mounts, &workdir, &claude_args)
+            let container_workdir = mounts::remap_path(
+                &workdir.canonicalize().context("failed to resolve working directory")?,
+                &home.canonicalize().context("failed to resolve home directory")?,
+                &container_home,
+            );
+            docker::run_claude(&mounts, &container_workdir, &claude_args)
         }
     }
 }

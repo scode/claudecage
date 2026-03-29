@@ -3,13 +3,16 @@ FROM ubuntu:24.04
 ARG USERNAME
 ARG UID
 ARG GID
-ARG USER_HOME
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
         curl \
+        file \
         git \
+        procps \
+        sudo \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code@latest \
@@ -18,6 +21,18 @@ RUN apt-get update \
 
 RUN groupadd -g ${GID} ${USERNAME} 2>/dev/null; \
     userdel -f $(id -nu ${UID} 2>/dev/null) 2>/dev/null; \
-    useradd -u ${UID} -g ${GID} -d ${USER_HOME} -s /bin/bash -o ${USERNAME}
+    useradd -u ${UID} -g ${GID} -m -s /bin/bash -o ${USERNAME} \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/brew-install
+
+# Install Homebrew as non-root user (needs sudo for /home/linuxbrew ownership)
+USER ${USERNAME}
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+
+RUN brew install scode/dist-tap/leiter
+
+# Remove temporary sudo grant
+USER root
+RUN rm /etc/sudoers.d/brew-install
 
 USER ${USERNAME}

@@ -12,6 +12,15 @@ pub struct Mount {
     pub readonly: bool,
 }
 
+/// Remap a host path under `host_home` to the equivalent path under
+/// `container_home`. Paths not under `host_home` are returned unchanged.
+pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathBuf {
+    match path.strip_prefix(host_home) {
+        Ok(relative) => container_home.join(relative),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 /// Compute all mounts needed for a claudecage invocation.
 ///
 /// The project directory is mounted read-only so claude can read code but
@@ -21,8 +30,16 @@ pub struct Mount {
 /// and their targets mounted read-only so those symlinks work inside the
 /// container. Nested symlinks are not followed.
 ///
+/// Host paths under `home` are remapped to `container_home` inside the
+/// container so that macOS-style paths like `/Users/alice` become
+/// Linux-conventional `/home/alice`.
+///
 /// Bails if `~/.claude` resolves to a path outside `$HOME`.
-pub fn resolve_mounts(home: &Path, project: &Path) -> Result<Vec<Mount>> {
+pub fn resolve_mounts(
+    home: &Path,
+    container_home: &Path,
+    project: &Path,
+) -> Result<Vec<Mount>> {
     let home = home
         .canonicalize()
         .context("failed to resolve home directory")?;
@@ -35,8 +52,8 @@ pub fn resolve_mounts(home: &Path, project: &Path) -> Result<Vec<Mount>> {
 
     // Project directory — read-only.
     mounts.push(Mount {
-        host_path: project.clone(),
-        container_path: project,
+        container_path: remap_path(&project, &home, container_home),
+        host_path: project,
         readonly: true,
     });
 
@@ -58,8 +75,8 @@ pub fn resolve_mounts(home: &Path, project: &Path) -> Result<Vec<Mount>> {
         );
     }
     mounts.push(Mount {
+        container_path: remap_path(&claude_dir, &home, container_home),
         host_path: claude_dir.clone(),
-        container_path: claude_dir.clone(),
         readonly: false,
     });
 
@@ -70,10 +87,28 @@ pub fn resolve_mounts(home: &Path, project: &Path) -> Result<Vec<Mount>> {
         std::fs::write(&claude_json, "{}").context("failed to create ~/.claude.json")?;
     }
     mounts.push(Mount {
-        host_path: claude_json.clone(),
-        container_path: claude_json,
+        container_path: remap_path(&claude_json, &home, container_home),
+        host_path: claude_json,
         readonly: false,
     });
+
+    // ~/.leiter — read-write if it exists. Leiter stores its soul and
+    // session logs here.
+    let leiter_dir = home.join(".leiter");
+    if leiter_dir.exists() {
+        let leiter_dir = leiter_dir
+            .canonicalize()
+            .context("failed to resolve ~/.leiter")?;
+        if leiter_dir.starts_with(&home) {
+            mounts.push(Mount {
+                container_path: remap_path(&leiter_dir, &home, container_home),
+                host_path: leiter_dir,
+                readonly: false,
+            });
+        } else {
+            debug!(?leiter_dir, "skipping ~/.leiter — resolves outside home");
+        }
+    }
 
     // Resolve symlinks to find directories outside ~/.claude that need
     // mounting for the symlinks to work inside the container.
@@ -82,8 +117,8 @@ pub fn resolve_mounts(home: &Path, project: &Path) -> Result<Vec<Mount>> {
     for target in deduped {
         debug!(?target, "mounting symlink target");
         mounts.push(Mount {
-            host_path: target.clone(),
-            container_path: target,
+            container_path: remap_path(&target, &home, container_home),
+            host_path: target,
             readonly: true,
         });
     }
@@ -166,27 +201,72 @@ mod tests {
     use std::fs;
     use std::os::unix::fs as unix_fs;
 
+    /// Tests use a synthetic container home to verify remapping.
+    const CONTAINER_HOME: &str = "/home/testuser";
+
+    fn container_home() -> PathBuf {
+        PathBuf::from(CONTAINER_HOME)
+    }
+
     #[test]
-    fn resolve_mounts_includes_project_and_claude_dir() {
+    fn remap_path_remaps_under_home() {
+        let host_home = PathBuf::from("/Users/alice");
+        let container = PathBuf::from("/home/alice");
+        assert_eq!(
+            remap_path(Path::new("/Users/alice/git/foo"), &host_home, &container),
+            PathBuf::from("/home/alice/git/foo"),
+        );
+    }
+
+    #[test]
+    fn remap_path_remaps_home_itself() {
+        let host_home = PathBuf::from("/Users/alice");
+        let container = PathBuf::from("/home/alice");
+        assert_eq!(
+            remap_path(Path::new("/Users/alice"), &host_home, &container),
+            PathBuf::from("/home/alice"),
+        );
+    }
+
+    #[test]
+    fn remap_path_passes_through_outside_home() {
+        let host_home = PathBuf::from("/Users/alice");
+        let container = PathBuf::from("/home/alice");
+        assert_eq!(
+            remap_path(Path::new("/etc/hosts"), &host_home, &container),
+            PathBuf::from("/etc/hosts"),
+        );
+    }
+
+    #[test]
+    fn resolve_mounts_remaps_container_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir(&home).unwrap();
         fs::create_dir(home.join(".claude")).unwrap();
-        let project = tmp.path().join("home").join("project");
+        let project = home.join("project");
         fs::create_dir(&project).unwrap();
 
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
         let home_canonical = home.canonicalize().unwrap();
         let project_canonical = project.canonicalize().unwrap();
 
         assert_eq!(mounts.len(), 3);
+        // Project: host path unchanged, container path remapped.
         assert_eq!(mounts[0].host_path, project_canonical);
-        assert_eq!(mounts[0].container_path, project_canonical);
+        assert_eq!(
+            mounts[0].container_path,
+            remap_path(&project_canonical, &home_canonical, &ch),
+        );
         assert!(mounts[0].readonly);
+        // .claude
         assert_eq!(mounts[1].host_path, home_canonical.join(".claude"));
-        assert_eq!(mounts[1].container_path, home_canonical.join(".claude"));
+        assert_eq!(mounts[1].container_path, ch.join(".claude"));
         assert!(!mounts[1].readonly);
+        // .claude.json
         assert_eq!(mounts[2].host_path, home_canonical.join(".claude.json"));
+        assert_eq!(mounts[2].container_path, ch.join(".claude.json"));
         assert!(!mounts[2].readonly);
     }
 
@@ -199,7 +279,7 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         assert!(!home.join(".claude").exists());
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
 
         assert!(home.join(".claude").exists());
         assert!(home.join(".claude.json").exists());
@@ -226,13 +306,18 @@ mod tests {
         )
         .unwrap();
 
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
 
         // project (ro), .claude (rw), .claude.json (rw), external dir (ro).
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
+        let home_canonical = home.canonicalize().unwrap();
         assert_eq!(mounts[3].host_path, external_canonical);
-        assert_eq!(mounts[3].container_path, external_canonical);
+        assert_eq!(
+            mounts[3].container_path,
+            remap_path(&external_canonical, &home_canonical, &ch),
+        );
         assert!(mounts[3].readonly);
     }
 
@@ -251,12 +336,17 @@ mod tests {
 
         unix_fs::symlink(&external, claude_dir.join("skills")).unwrap();
 
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
 
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
+        let home_canonical = home.canonicalize().unwrap();
         assert_eq!(mounts[3].host_path, external_canonical);
-        assert_eq!(mounts[3].container_path, external_canonical);
+        assert_eq!(
+            mounts[3].container_path,
+            remap_path(&external_canonical, &home_canonical, &ch),
+        );
         assert!(mounts[3].readonly);
     }
 
@@ -272,7 +362,7 @@ mod tests {
 
         unix_fs::symlink("/nonexistent/path", claude_dir.join("broken")).unwrap();
 
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
         assert_eq!(mounts.len(), 3);
     }
 
@@ -288,7 +378,7 @@ mod tests {
 
         unix_fs::symlink(claude_dir.join("subdir"), claude_dir.join("link")).unwrap();
 
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
         assert_eq!(mounts.len(), 3);
     }
 
@@ -308,7 +398,7 @@ mod tests {
 
         unix_fs::symlink(outside.join("secrets"), claude_dir.join("secrets")).unwrap();
 
-        let mounts = resolve_mounts(&home, &project).unwrap();
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
         assert_eq!(mounts.len(), 3);
     }
 
@@ -325,11 +415,74 @@ mod tests {
 
         unix_fs::symlink(&outside, home.join(".claude")).unwrap();
 
-        let err = resolve_mounts(&home, &project).unwrap_err();
+        let err = resolve_mounts(&home, &container_home(), &project).unwrap_err();
         assert!(
             err.to_string().contains("outside the home directory"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn resolve_mounts_includes_leiter_dir_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        fs::create_dir(home.join(".leiter")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let home_canonical = home.canonicalize().unwrap();
+
+        let leiter_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".leiter"));
+        assert!(leiter_mount.is_some(), "expected ~/.leiter mount");
+        let leiter_mount = leiter_mount.unwrap();
+        assert_eq!(leiter_mount.host_path, home_canonical.join(".leiter"));
+        assert!(!leiter_mount.readonly);
+    }
+
+    #[test]
+    fn resolve_mounts_skips_leiter_symlink_outside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let outside = tmp.path().join("outside-leiter");
+        fs::create_dir(&outside).unwrap();
+        unix_fs::symlink(&outside, home.join(".leiter")).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+
+        let leiter_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".leiter"));
+        assert!(leiter_mount.is_none(), "expected no ~/.leiter mount for symlink outside home");
+    }
+
+    #[test]
+    fn resolve_mounts_skips_leiter_dir_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+
+        let leiter_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".leiter"));
+        assert!(leiter_mount.is_none(), "expected no ~/.leiter mount");
     }
 
     #[test]

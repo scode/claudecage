@@ -65,6 +65,10 @@ rebuild the image even if it exists.
 The image must include a non-root user matching the host user's uid and gid so
 that claude does not run as root inside the container.
 
+The image includes Homebrew (Linuxbrew) and installs `leiter` via
+`scode/dist-tap`. These are personal preferences — a future improvement should
+make the set of Homebrew-installed tools configurable.
+
 ### `claudecage image recreate`
 
 Rebuild the Docker image from scratch, bypassing all Docker layer caches. Use
@@ -94,6 +98,11 @@ Only the following host paths are visible inside the container:
 - **`~/.claude.json`**: mounted read-write. Claude stores configuration in
   this file alongside the `~/.claude` directory. Created automatically (as
   `{}`) if it does not exist.
+
+- **`~/.leiter`** (if it exists): mounted read-write. Leiter stores its soul
+  and session logs here. Only mounted when the directory already exists on
+  the host — it is not created automatically. If `~/.leiter` is a symlink,
+  its resolved path must be under `$HOME` or it is silently skipped.
 
 - **Symlink targets from `~/.claude`**: top-level symlinks in `~/.claude` are
   resolved and their targets mounted read-only. This allows configurations
@@ -147,18 +156,14 @@ Nothing persists inside the container between runs except through the mounted
 `~/.claude` directory. This means any tools installed, files created, or state
 accumulated inside the container during a session are lost when it ends.
 
-### Mount path identity
+### Mount path remapping
 
-All mounts use the same absolute path inside the container as on the host. The
-project directory at `/Users/alice/src/myproject` is mounted at
-`/Users/alice/src/myproject` inside the container, not at `/project` or some
-other synthetic path. Same for `~/.claude` and symlink targets. The container's
-`HOME` environment variable is set to the host user's home directory path.
-
-This matters because claude may reference absolute paths in its output, and
-those paths should be valid on the host for the user to act on. See "macOS
-paths inside Linux container" in the known gaps section for the tradeoff this
-creates.
+Host paths under `$HOME` are remapped to Linux-conventional paths inside the
+container. The container user's home directory is `/home/<username>`, so a
+host path like `/Users/alice/src/myproject` becomes
+`/home/alice/src/myproject` inside the container. This means paths in
+claude's output use Linux-style paths that differ from the host — a tradeoff
+for having a standard Linux filesystem layout inside the container.
 
 ## Known gaps
 
@@ -171,14 +176,6 @@ These are areas where the current behavior is acceptable but could be improved:
 - **TTY requirement.** The container always allocates a TTY (`-it`). Scripted
   or piped invocations without a terminal will fail. Supporting non-interactive
   use is a future improvement.
-
-- **macOS paths inside Linux container.** Host paths are mounted at their
-  original absolute paths, so macOS-style paths like `/Users/alice/...` appear
-  inside the Linux container. This could confuse tools that expect
-  Linux-conventional paths. A future improvement should map host paths to a
-  canonical location inside the container (e.g., `/home/alice/...`) while
-  preserving the invariant that paths in claude's output are meaningful to the
-  user.
 
 - **Symlink-based mount expansion.** A session can create symlinks in
   `~/.claude` pointing to directories under `$HOME` (e.g., `~/.ssh`), causing
@@ -202,3 +199,13 @@ but they may be worth revisiting:
 - **Configurable symlink targets.** An allowlist of permitted symlink target
   directories (rather than accepting anything under `$HOME`) would reduce the
   mount expansion risk from writable `~/.claude`.
+
+- **Configurable Homebrew packages.** The image currently hardcodes `leiter`
+  from `scode/dist-tap`. A configuration file or CLI flag to specify
+  additional Homebrew taps and packages to install would make the image
+  useful to others.
+
+- **Image rebuild notification.** When claudecage is upgraded, the existing
+  Docker image may be stale. `claudecage claude` should detect that the
+  binary version is newer than the image it built and prompt the user to
+  recreate the image.
