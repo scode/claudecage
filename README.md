@@ -99,6 +99,19 @@ outside the project and `~/.claude`.
 - **Ephemeral containers.** Tools baked into the image (Homebrew, leiter) persist, but anything installed during a
   session is lost when it exits.
 
+## Testing
+
+`cargo test` runs unit tests only. Integration tests require external infrastructure and are gated by the
+`CLAUDECAGE_TEST_CAPABILITIES` environment variable, which takes a comma-separated list of capabilities:
+
+- `docker` — Docker daemon is available
+
+```
+CLAUDECAGE_TEST_CAPABILITIES=docker cargo test
+```
+
+Without the variable set, integration tests are silently skipped.
+
 ## Verbosity
 
 Default log level is INFO. Use `-v` to increase (DEBUG, TRACE) or `-q` to decrease (WARN, ERROR, OFF). These stack:
