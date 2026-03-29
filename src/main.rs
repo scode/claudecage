@@ -34,6 +34,8 @@ enum Command {
     },
     /// Open an interactive shell in the container.
     Shell,
+    /// Show what mounts would be created in the container.
+    Mounts,
     /// Manage the claudecage Docker image.
     Image {
         #[command(subcommand)]
@@ -67,12 +69,8 @@ fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
     LEVELS[idx as usize]
 }
 
-/// Check that the image exists and the working directory is under $HOME,
-/// then resolve mounts and the container working directory.
-fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
-    if !docker::image_exists()? {
-        bail!("image not found — run 'claudecage image create' first");
-    }
+/// Validate the working directory and resolve mounts and the container working directory.
+fn resolve_mounts(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
     let workdir = std::env::current_dir().context("could not determine working directory")?;
     if !workdir.starts_with(home) {
         bail!(
@@ -91,6 +89,14 @@ fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)>
         &container_home,
     );
     Ok((mounts, container_workdir))
+}
+
+/// Resolve mounts and verify the docker image exists.
+fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
+    if !docker::image_exists()? {
+        bail!("image not found — run 'claudecage image create' first");
+    }
+    resolve_mounts(home)
 }
 
 fn run() -> Result<ExitCode> {
@@ -125,6 +131,26 @@ fn run() -> Result<ExitCode> {
         Command::Shell => {
             let (mounts, container_workdir) = resolve_container_setup(&home)?;
             docker::run_container(&mounts, &container_workdir, docker::Entrypoint::Shell)
+        }
+        Command::Mounts => {
+            let (mut mounts, _) = resolve_mounts(&home)?;
+            mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
+            let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            for mount in &mounts {
+                let mode = match (mount.readonly, use_color) {
+                    (true, true) => "\x1b[90m(ro)\x1b[0m",
+                    (true, false) => "(ro)",
+                    (false, true) => "\x1b[31m(rw)\x1b[0m",
+                    (false, false) => "(rw)",
+                };
+                println!(
+                    "{} {} -> {}",
+                    mode,
+                    mount.host_path.display(),
+                    mount.container_path.display(),
+                );
+            }
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
