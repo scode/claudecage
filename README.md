@@ -19,7 +19,7 @@ claudecage claude -- -p "fix the build"  # pass arguments to claude
 ## Image management
 
 - `claudecage image create` — builds a Docker image (Ubuntu 24.04 + Node 22 +
-  claude-code) with a non-root user matching the host user's uid/gid. Pass
+  claude-code + Homebrew) with a non-root user matching the host user's uid/gid. Pass
   `--rebuild` to force rebuilding even if the image exists. Only needs to be
   run once.
 - `claudecage image recreate` — rebuilds the image from scratch with no Docker
@@ -37,17 +37,21 @@ that accumulate over time.
 
 Mounts are computed fresh on each invocation:
 
-- **Project directory** (the current working directory) — mounted read-only at
-  the same absolute path. Claude can read your code but can't modify it on the
-  host. Only directories under `$HOME` are allowed.
-- **`~/.claude`** — mounted read-write at the same absolute path. This is how
-  auth tokens, session state, history, and settings persist across ephemeral
-  container runs. Created automatically if it doesn't exist. If `~/.claude` is
-  a symlink, its resolved path must be under `$HOME`.
+- **Project directory** (the current working directory) — mounted read-only.
+  Claude can read your code but can't modify it on the host. Only directories
+  under `$HOME` are allowed.
+- **`~/.claude`** — mounted read-write. Auth tokens, session state, history,
+  and settings persist across ephemeral container runs. Created automatically
+  if it doesn't exist. If `~/.claude` is a symlink, its resolved path must be
+  under `$HOME`.
+- **`~/.leiter`** — mounted read-write if it exists. Not created automatically.
 - **Symlink targets from `~/.claude`** — top-level symlinks in `~/.claude` (e.g.,
   to a dotfiles repo for `settings.json` or `CLAUDE.md`) are resolved and their
-  targets mounted read-only at the same host paths. Nested symlinks inside
-  subdirectories of `~/.claude` are not followed.
+  targets mounted read-only. Nested symlinks inside subdirectories of `~/.claude`
+  are not followed.
+
+Host paths are remapped to Linux-conventional paths inside the container (e.g.,
+`/Users/alice/src/foo` becomes `/home/alice/src/foo`).
 
 Only these specific paths are visible inside the container. The rest of `$HOME`
 (including `~/.ssh`, `~/.aws`, browser profiles, etc.) is not mounted and not
@@ -89,8 +93,8 @@ against credential exfiltration from paths outside the project and `~/.claude`.
   session (`-it`). Piped or scripted invocations without a terminal will fail.
 - **Working directory must be under `$HOME`.** Projects outside the home
   directory cannot be used.
-- **Ephemeral containers.** Any packages or tools installed inside a claude
-  session are lost when it exits.
+- **Ephemeral containers.** Tools baked into the image (Homebrew, leiter)
+  persist, but anything installed during a session is lost when it exits.
 
 ## Verbosity
 
