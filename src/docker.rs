@@ -101,13 +101,13 @@ pub fn run_container(
         .context("working directory is not valid UTF-8")?;
 
     let mut cmd = Command::new("docker");
-    cmd.args([
-        "run",
-        "--rm",
-        "-it",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges",
-    ]);
+    cmd.args(["run", "--rm"]);
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        cmd.arg("-it");
+    } else {
+        cmd.arg("-i");
+    }
+    cmd.args(["--cap-drop=ALL", "--security-opt=no-new-privileges"]);
 
     for mount in mounts {
         let host = mount

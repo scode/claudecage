@@ -105,9 +105,11 @@ outside the project and `~/.claude`.
 `CLAUDECAGE_TEST_CAPABILITIES` environment variable, which takes a comma-separated list of capabilities:
 
 - `docker` — Docker daemon is available
+- `claude_auth` — Claude is authenticated and the container image exists (end-to-end test)
 
 ```
 CLAUDECAGE_TEST_CAPABILITIES=docker cargo test
+CLAUDECAGE_TEST_CAPABILITIES=docker,claude_auth cargo test
 ```
 
 Without the variable set, integration tests are silently skipped.
