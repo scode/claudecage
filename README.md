@@ -5,8 +5,8 @@
 
 Run Claude Code with `--dangerously-skip-permissions` inside a Docker container so the "dangerous" part is contained.
 
-Your project directory is mounted read-only. Claude can read code but can't modify files on the host. `~/.claude` is
-mounted read-write so auth, sessions, and settings persist across runs.
+Your project directory is mounted read-write so Claude can modify code. `~/.claude` is mounted read-write so auth,
+sessions, and settings persist across runs. Everything else on the host is inaccessible.
 
 ## Quickstart
 
@@ -37,8 +37,8 @@ state that accumulate over time.
 
 Mounts are computed fresh on each invocation:
 
-- **Project directory** (the current working directory) — mounted read-only. Claude can read your code but can't modify
-  it on the host. Only directories under `$HOME` are allowed.
+- **Project directory** (the current working directory) — mounted read-write. Claude can read and modify your code. Only
+  directories under `$HOME` are allowed.
 - **`~/.claude`** — mounted read-write. Auth tokens, session state, history, and settings persist across ephemeral
   container runs. Created automatically if it doesn't exist. If `~/.claude` is a symlink, its resolved path must be
   under `$HOME`.
@@ -57,8 +57,8 @@ profiles, etc.) is not mounted and not accessible to claude.
 
 The intent is to let claude run with full permissions in an environment where "full permissions" can't do real damage:
 
-- **Filesystem**: only the project directory (read-only) and `~/.claude` (read-write) are mounted. Claude cannot see or
-  access anything else on the host.
+- **Filesystem**: only the project directory and `~/.claude` (both read-write) are mounted. Claude cannot see or access
+  anything else on the host.
 - **Privileges**: claude runs as a non-root user matching the host user's uid/gid. The container runs with
   `--cap-drop=ALL` and `--security-opt=no-new-privileges` — no Linux capabilities, no setuid escalation.
 - **Ephemeral**: each invocation is a fresh container (`--rm`). No state leaks between runs except through `~/.claude`.
