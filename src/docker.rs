@@ -48,7 +48,14 @@ pub fn build_image() -> Result<()> {
 /// reduce the attack surface.
 pub fn create_container(mounts: &[Mount], home: &Path) -> Result<()> {
     if container_exists()? {
-        bail!("container '{CONTAINER_NAME}' already exists — run 'docker rm -f {CONTAINER_NAME}' to recreate");
+        info!("removing existing container '{CONTAINER_NAME}'");
+        let status = Command::new("docker")
+            .args(["rm", "-f", CONTAINER_NAME])
+            .status()
+            .context("failed to remove existing container")?;
+        if !status.success() {
+            bail!("failed to remove existing container '{CONTAINER_NAME}'");
+        }
     }
 
     let home_str = home
