@@ -23,8 +23,8 @@ pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathB
 
 /// Compute all mounts needed for a claudecage invocation.
 ///
-/// The project directory is mounted read-only so claude can read code but
-/// not modify the host filesystem. `~/.claude` is created if absent and
+/// The project directory is mounted read-write so claude can modify code.
+/// `~/.claude` is created if absent and
 /// mounted read-write so auth, sessions, and settings persist across
 /// ephemeral container runs. Top-level symlinks in `~/.claude` are resolved
 /// and their targets mounted read-only so those symlinks work inside the
@@ -50,11 +50,11 @@ pub fn resolve_mounts(
 
     let mut mounts = Vec::new();
 
-    // Project directory — read-only.
+    // Project directory — read-write so claude can modify code.
     mounts.push(Mount {
         container_path: remap_path(&project, &home, container_home),
         host_path: project,
-        readonly: true,
+        readonly: false,
     });
 
     // Ensure ~/.claude exists so auth and session state can be persisted.
@@ -259,7 +259,7 @@ mod tests {
             mounts[0].container_path,
             remap_path(&project_canonical, &home_canonical, &ch),
         );
-        assert!(mounts[0].readonly);
+        assert!(!mounts[0].readonly);
         // .claude
         assert_eq!(mounts[1].host_path, home_canonical.join(".claude"));
         assert_eq!(mounts[1].container_path, ch.join(".claude"));
@@ -309,7 +309,7 @@ mod tests {
         let ch = container_home();
         let mounts = resolve_mounts(&home, &ch, &project).unwrap();
 
-        // project (ro), .claude (rw), .claude.json (rw), external dir (ro).
+        // project (rw), .claude (rw), .claude.json (rw), external dir (ro).
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
         let home_canonical = home.canonicalize().unwrap();

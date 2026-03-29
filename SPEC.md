@@ -17,7 +17,8 @@ filesystem. This is not a hardened adversarial containment system — it's a pra
 
 The goal is to protect the local environment from being side-effected by the agent. Specifically:
 
-- The agent must not be able to modify, create, or delete files on the host filesystem outside of `~/.claude`.
+- The agent must not be able to modify, create, or delete files on the host filesystem outside of the project directory
+  and `~/.claude`.
 - The agent must not be able to read host files outside the project directory, `~/.claude`, and the symlink targets
   described below. However, because `~/.claude` is writable, the agent can create symlinks there that expand read-only
   visibility to other directories under `$HOME` on the next run (see "Symlink target restrictions" below).
@@ -83,8 +84,8 @@ claude-code or to recover from a broken image.
 
 Only the following host paths are visible inside the container:
 
-- **Project directory** (the working directory at invocation time): mounted read-only. The agent can read the project's
-  code but cannot modify it on the host.
+- **Project directory** (the working directory at invocation time): mounted read-write. The agent can read and modify
+  the project's code on the host.
 
 - **`~/.claude`**: mounted read-write. This is where auth tokens, session state, conversation history, and settings
   live. Created automatically if it does not exist. If `~/.claude` is itself a symlink, its resolved path must be under
