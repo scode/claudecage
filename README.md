@@ -22,6 +22,19 @@ claudecage auth set-github-token     # store a GitHub PAT for PR access
 claudecage auth remove-github-token  # remove the stored token
 ```
 
+## GitHub access (optional)
+
+To let the agent create and merge PRs, store a GitHub personal access token:
+
+1. Create a [fine-grained PAT](https://github.com/settings/personal-access-tokens) scoped to the repositories you want
+   the agent to access. Grant "Contents: Read and write", "Pull requests: Read and write", and "Checks: Read-only"
+   permissions.
+2. Run `claudecage auth set-github-token` and paste the token.
+
+The token is stored in the macOS Keychain and injected into every container session as `GH_TOKEN`. Classic tokens
+(`ghp_`) also work, but fine-grained tokens are recommended because they limit access to specific repos. See SPEC.md for
+the full security model around token handling.
+
 ## Image management
 
 - `claudecage image create` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew + gh) with a

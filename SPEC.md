@@ -170,9 +170,10 @@ Security properties of the token injection:
 - The token is stored encrypted at rest by the macOS Keychain. It is not in a plaintext file on the host.
 - The token is read from the Keychain at container launch time by shelling out to
   `/usr/bin/security find-generic-password`.
-- The token never appears in process argument lists visible to `ps` or similar tools on the host. During storage, it is
-  written to the `security add-generic-password` process via stdin. During container launch, it is passed to the docker
-  process via an anonymous pipe and file descriptor inheritance. No temporary files are created in either case.
+- The token never appears in process argument lists visible to `ps` or similar tools on the host. During storage, the
+  command is sent to `security -i` (interactive mode) via stdin so the token is part of the piped command text, not
+  process argv. During container launch, it is passed to the docker process via an anonymous pipe and file descriptor
+  inheritance. No temporary files are created in either case.
 - Inside the container, the token is available as the `GH_TOKEN` environment variable. This is an accepted trade-off —
   the sandbox model already trusts the agent with read-write access to the project directory and `~/.claude`.
 
