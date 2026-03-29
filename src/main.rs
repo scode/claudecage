@@ -12,7 +12,7 @@ use tracing::{debug, info};
 /// Run Claude Code with full permissions inside a sandboxed Docker container.
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 
     /// Increase log verbosity (repeat for more: -v debug, -vv trace).
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
@@ -21,14 +21,16 @@ struct Cli {
     /// Decrease log verbosity (repeat for less: -q warn, -qq error, -qqq off).
     #[arg(short = 'q', long = "quiet", action = clap::ArgAction::Count, global = true)]
     quiet: u8,
-
-    /// Arguments forwarded to claude (after --).
-    #[arg(last = true)]
-    claude_args: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run claude in the current working directory.
+    Claude {
+        /// Arguments forwarded to claude (after --).
+        #[arg(last = true)]
+        claude_args: Vec<String>,
+    },
     /// Manage the claudecage Docker image.
     Image {
         #[command(subcommand)]
@@ -72,7 +74,7 @@ fn run() -> Result<ExitCode> {
     let home = dirs::home_dir().context("could not determine home directory")?;
 
     match cli.command {
-        Some(Command::Image { action }) => {
+        Command::Image { action } => {
             match action {
                 ImageAction::Create { rebuild } => {
                     if rebuild || !docker::image_exists()? {
@@ -87,7 +89,7 @@ fn run() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        None => {
+        Command::Claude { claude_args } => {
             if !docker::image_exists()? {
                 bail!("image not found — run 'claudecage image create' first");
             }
@@ -102,7 +104,7 @@ fn run() -> Result<ExitCode> {
             }
             let mounts = mounts::resolve_mounts(&home, &workdir)?;
             debug!(count = mounts.len(), "resolved mounts");
-            docker::run_claude(&mounts, &workdir, &cli.claude_args)
+            docker::run_claude(&mounts, &workdir, &claude_args)
         }
     }
 }

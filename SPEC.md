@@ -41,7 +41,11 @@ The following are explicitly *not* primary defense goals:
 
 ## CLI
 
-### `claudecage [-- claude-args...]`
+### `claudecage`
+
+With no subcommand, prints help and exits.
+
+### `claudecage claude [-- claude-args...]`
 
 Run claude in the current working directory. The working directory must be
 under `$HOME` — claudecage must reject directories outside `$HOME` with a
