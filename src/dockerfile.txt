@@ -29,7 +29,10 @@ USER ${USERNAME}
 RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
 
-RUN brew install scode/dist-tap/leiter
+RUN brew install gh scode/dist-tap/leiter
+
+# Configure gh as git credential helper so git push uses GH_TOKEN when set.
+RUN gh auth setup-git
 
 # Remove temporary sudo grant
 USER root

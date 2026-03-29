@@ -1,3 +1,6 @@
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
@@ -58,16 +61,27 @@ pub fn build_image(no_cache: bool) -> Result<()> {
     Ok(())
 }
 
+/// Write env vars in docker `--env-file` format (`KEY=VALUE\n` per entry).
+fn write_env_file(writer: &mut impl Write, env_vars: &[(&str, &str)]) -> Result<()> {
+    for (key, value) in env_vars {
+        writeln!(writer, "{key}={value}").context("failed to write to env pipe")?;
+    }
+    Ok(())
+}
+
 pub enum Entrypoint<'a> {
     Claude(&'a [String]),
     Shell,
 }
 
 /// Run an ephemeral container with the given mounts and working directory.
+///
+/// Values in `env_vars` do not appear in process argument lists on the host.
 pub fn run_container(
     mounts: &[Mount],
     workdir: &Path,
     entrypoint: Entrypoint<'_>,
+    env_vars: &[(&str, &str)],
 ) -> Result<ExitCode> {
     let workdir_str = workdir
         .to_str()
@@ -100,6 +114,33 @@ pub fn run_container(
     }
 
     cmd.args(["-w", workdir_str]);
+
+    // Kept alive so the pipe read fd remains valid through cmd.status().
+    let _pipe_read = if !env_vars.is_empty() {
+        let (pipe_read, pipe_write) = nix::unistd::pipe().context("failed to create pipe")?;
+        let mut writer: std::fs::File = pipe_write.into();
+        write_env_file(&mut writer, env_vars)?;
+        drop(writer);
+
+        let read_fd = pipe_read.as_raw_fd();
+        // SAFETY: pre_exec runs between fork and exec in the child.
+        // dup2 and close are async-signal-safe, satisfying pre_exec's contract.
+        unsafe {
+            cmd.pre_exec(move || {
+                if read_fd != 3 {
+                    nix::unistd::dup2(read_fd, 3)?;
+                    nix::unistd::close(read_fd)?;
+                }
+                Ok(())
+            });
+        }
+        cmd.arg("--env-file=/dev/fd/3");
+
+        Some(pipe_read)
+    } else {
+        None
+    };
+
     cmd.arg(IMAGE_NAME);
 
     match entrypoint {
@@ -123,4 +164,30 @@ pub fn run_container(
     let status = cmd.status().context("failed to run docker")?;
 
     Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_env_file_single_var() {
+        let mut buf = Vec::new();
+        write_env_file(&mut buf, &[("GH_TOKEN", "ghp_abc")]).unwrap();
+        assert_eq!(buf, b"GH_TOKEN=ghp_abc\n");
+    }
+
+    #[test]
+    fn write_env_file_multiple_vars() {
+        let mut buf = Vec::new();
+        write_env_file(&mut buf, &[("A", "1"), ("B", "2")]).unwrap();
+        assert_eq!(buf, b"A=1\nB=2\n");
+    }
+
+    #[test]
+    fn write_env_file_empty() {
+        let mut buf = Vec::new();
+        write_env_file(&mut buf, &[]).unwrap();
+        assert!(buf.is_empty());
+    }
 }

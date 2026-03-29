@@ -6,7 +6,8 @@
 Run Claude Code with `--dangerously-skip-permissions` inside a Docker container so the "dangerous" part is contained.
 
 Your project directory is mounted read-write so Claude can modify code. `~/.claude` is mounted read-write so auth,
-sessions, and settings persist across runs. Everything else on the host is inaccessible.
+sessions, and settings persist across runs. Nothing else from the host filesystem is visible. A GitHub token can
+optionally be injected as an environment variable for PR access (see Quickstart).
 
 ## Quickstart
 
@@ -17,13 +18,15 @@ claudecage claude            # run claude in the current directory
 claudecage claude -- -p "fix the build"  # pass arguments to claude
 claudecage shell             # open a bash shell in the container
 claudecage mounts            # show what gets mounted and whether ro/rw
+claudecage auth set-github-token     # store a GitHub PAT for PR access
+claudecage auth remove-github-token  # remove the stored token
 ```
 
 ## Image management
 
-- `claudecage image create` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew) with a non-root
-  user matching the host user's uid/gid. Pass `--rebuild` to force rebuilding even if the image exists. Only needs to be
-  run once.
+- `claudecage image create` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew + gh) with a
+  non-root user matching the host user's uid/gid. Pass `--rebuild` to force rebuilding even if the image exists. Only
+  needs to be run once.
 - `claudecage image recreate` — rebuilds the image from scratch with no Docker cache. Use after upgrading claudecage or
   when something is wrong with the image.
 
@@ -58,7 +61,8 @@ profiles, etc.) is not mounted and not accessible to claude.
 The intent is to let claude run with full permissions in an environment where "full permissions" can't do real damage:
 
 - **Filesystem**: only the project directory and `~/.claude` (both read-write) are mounted. Claude cannot see or access
-  anything else on the host.
+  anything else on the host. If a GitHub token is configured (see Quickstart), it is injected as an environment
+  variable.
 - **Privileges**: claude runs as a non-root user matching the host user's uid/gid. The container runs with
   `--cap-drop=ALL` and `--security-opt=no-new-privileges` — no Linux capabilities, no setuid escalation.
 - **Ephemeral**: each invocation is a fresh container (`--rm`). No state leaks between runs except through `~/.claude`.

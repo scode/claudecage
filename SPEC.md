@@ -60,6 +60,20 @@ Print the bind mounts that would be used for a container invocation in the curre
 the read/write mode, host path, and container path. Output is sorted by host path. When stdout is a terminal, the mode
 tag is colorized (grey for read-only, red for read-write). Does not require the Docker image to exist.
 
+### `claudecage auth set-github-token`
+
+Read a single line from stdin as a GitHub personal access token and store it in the macOS Keychain. When stdin is a
+terminal, a prompt is printed to stderr and echo is disabled to avoid leaking the token into scrollback. When stdin is
+piped, the line is read plainly. Both fine-grained personal access tokens (prefix `github_pat_`) and classic tokens
+(prefix `ghp_`) are accepted; other input is rejected. Fine-grained tokens are recommended because they can be scoped to
+specific repositories and permissions, but classic tokens are not blocked — the user is responsible for the scope of
+their token. The token is stored using the macOS `security` CLI under service name `claudecage`, account `github-token`.
+This overwrites any previously stored token.
+
+### `claudecage auth remove-github-token`
+
+Remove the stored GitHub token from the Keychain. Exits successfully whether or not a token was previously stored.
+
 ### `claudecage image create [--rebuild]`
 
 Build the Docker image if it does not already exist. If `--rebuild` is passed, rebuild the image even if it exists.
@@ -67,8 +81,9 @@ Build the Docker image if it does not already exist. If `--rebuild` is passed, r
 The image must include a non-root user matching the host user's uid and gid so that claude does not run as root inside
 the container.
 
-The image includes Homebrew (Linuxbrew) and installs `leiter` via `scode/dist-tap`. These are personal preferences — a
-future improvement should make the set of Homebrew-installed tools configurable.
+The image includes Homebrew (Linuxbrew) and installs `gh` and `leiter` via Homebrew. `gh` is configured as the git
+credential helper so that `git push` and other git operations use `GH_TOKEN` when it is set. `leiter` is a personal
+preference — a future improvement should make the set of Homebrew-installed tools configurable.
 
 ### `claudecage image recreate`
 
@@ -135,6 +150,36 @@ NOTE: this is a known gap. The container can reach `localhost`, which may bypass
 the user runs locally with the assumption that only trusted local processes will connect. A future improvement should
 restrict network access to prevent localhost access at minimum.
 
+### GitHub access (optional)
+
+When a GitHub token is stored in the macOS Keychain (service `claudecage`, account `github-token`), claudecage injects
+it into the container as the `GH_TOKEN` environment variable. `gh` and `git` inside the container use this automatically
+for authentication. The same token is injected regardless of which project directory is being used. This is intentional
+— the token's permissions are scoped by GitHub (the fine-grained PAT only grants access to specific repositories), so
+exposure to a session in a different project does not widen access beyond what the token already permits. When no token
+is configured, the container launches without `GH_TOKEN` and has no authenticated GitHub API access — this is the
+default behavior and requires no user action.
+
+The Keychain lookup happens after image and mount setup succeeds, just before launching the container. If the lookup
+fails (e.g., `/usr/bin/security` is unavailable or the Keychain is inaccessible), claudecage exits with an error rather
+than silently launching without GitHub access. This is intentional — a broken Keychain should be investigated, not
+masked.
+
+Security properties of the token injection:
+
+- The token is stored encrypted at rest by the macOS Keychain. It is not in a plaintext file on the host.
+- The token is read from the Keychain at container launch time by shelling out to
+  `/usr/bin/security find-generic-password`.
+- The token never appears in process argument lists visible to `ps` or similar tools on the host. During storage, it is
+  written to the `security add-generic-password` process via stdin. During container launch, it is passed to the docker
+  process via an anonymous pipe and file descriptor inheritance. No temporary files are created in either case.
+- Inside the container, the token is available as the `GH_TOKEN` environment variable. This is an accepted trade-off —
+  the sandbox model already trusts the agent with read-write access to the project directory and `~/.claude`.
+
+The recommended token configuration is a fine-grained PAT scoped to specific repositories with only "Contents: Read and
+write" and "Pull requests: Read and write" permissions. This limits the blast radius if the token is exposed inside the
+container.
+
 ### Container lifecycle
 
 Each `claudecage` invocation creates a fresh container that is removed on exit. Nothing persists inside the container
@@ -176,6 +221,9 @@ These are not gaps — the current behavior is intentionally designed this way �
 
 - **Configurable Homebrew packages.** The image currently hardcodes `leiter` from `scode/dist-tap`. A configuration file
   or CLI flag to specify additional Homebrew taps and packages to install would make the image useful to others.
+
+- **Graceful Keychain degradation.** The Keychain lookup currently blocks container launch on failure. A future
+  improvement could allow launching without GitHub access when the Keychain is unavailable, with a warning.
 
 - **Image rebuild notification.** When claudecage is upgraded, the existing Docker image may be stale.
   `claudecage claude` should detect that the binary version is newer than the image it built and prompt the user to
