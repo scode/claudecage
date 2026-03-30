@@ -70,9 +70,10 @@ Mounts are computed fresh on each invocation:
   container runs. Created automatically if it doesn't exist. If `~/.claude` is a symlink, its resolved path must be
   under `$HOME`.
 - **`~/.leiter`** — mounted read-write if it exists. Not created automatically.
-- **Symlink targets from `~/.claude`** — top-level symlinks in `~/.claude` (e.g., to a dotfiles repo for `settings.json`
-  or `CLAUDE.md`) are resolved and their targets mounted read-only. Nested symlinks inside subdirectories of `~/.claude`
-  are not followed.
+- **Symlink targets from `~/.claude`** — symlinks anywhere within `~/.claude` are recursively resolved and their targets
+  mounted read-only. This covers both top-level symlinks (e.g., `settings.json -> ~/dotfiles/...`) and nested ones
+  (e.g., `skills/foo -> ~/git/foo`). The traversal descends into real subdirectories but does not follow symlinks to
+  directories, preventing cycles.
 
 Host paths are remapped to Linux-conventional paths inside the container (e.g., `/Users/alice/src/foo` becomes
 `/home/alice/src/foo`).
