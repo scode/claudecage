@@ -11,8 +11,11 @@ RUN apt-get update \
         curl \
         file \
         git \
+        imagemagick \
         procps \
         sudo \
+        unzip \
+        zip \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code@latest \
@@ -30,7 +33,7 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
     LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install gh scode/dist-tap/leiter rust
+RUN brew install dprint gh scode/dist-tap/leiter rust
 
 # TODO: stax v0.37.0 lacks linux-aarch64 binaries. The release after v0.37.0
 # should include them — replace this clone-and-build with `brew install scode/dist-tap/stax`.
