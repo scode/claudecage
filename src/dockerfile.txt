@@ -12,6 +12,7 @@ RUN apt-get update \
         file \
         git \
         imagemagick \
+        less \
         procps \
         sudo \
         unzip \
