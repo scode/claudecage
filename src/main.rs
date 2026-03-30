@@ -61,13 +61,13 @@ enum Command {
 #[derive(Subcommand)]
 enum ImageAction {
     /// Build the Docker image.
-    Create {
+    Build {
         /// Rebuild the image even if it already exists.
         #[arg(long)]
         rebuild: bool,
     },
     /// Rebuild the image from scratch (no cache).
-    Recreate,
+    Rebuild,
 }
 
 #[derive(Subcommand)]
@@ -153,7 +153,7 @@ fn resolve_mounts(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
 /// Resolve mounts and verify the docker image exists.
 fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
     if !docker::image_exists()? {
-        bail!("image not found — run 'claudecage image create' first");
+        bail!("image not found — run 'claudecage image build' first");
     }
     resolve_mounts(home)
 }
@@ -170,14 +170,14 @@ fn run() -> Result<ExitCode> {
     match cli.command {
         Command::Image { action } => {
             match action {
-                ImageAction::Create { rebuild } => {
+                ImageAction::Build { rebuild } => {
                     if rebuild || !docker::image_exists()? {
                         docker::build_image(false)?;
                     } else {
-                        info!("image already exists (use 'claudecage image recreate' to rebuild from scratch)");
+                        info!("image already exists (use 'claudecage image rebuild' to rebuild from scratch)");
                     }
                 }
-                ImageAction::Recreate => {
+                ImageAction::Rebuild => {
                     docker::build_image(true)?;
                 }
             }

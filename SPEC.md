@@ -79,7 +79,7 @@ This overwrites any previously stored token.
 
 Remove the stored GitHub token from the Keychain. Exits successfully whether or not a token was previously stored.
 
-### `claudecage image create [--rebuild]`
+### `claudecage image build [--rebuild]`
 
 Build the Docker image if it does not already exist. If `--rebuild` is passed, rebuild the image even if it exists.
 
@@ -90,7 +90,7 @@ The image includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, `rust`, and
 as the git credential helper so that `git push` and other git operations use `GH_TOKEN` when it is set. `leiter` is a
 personal preference — a future improvement should make the set of Homebrew-installed tools configurable.
 
-### `claudecage image recreate`
+### `claudecage image rebuild`
 
 Rebuild the Docker image from scratch, bypassing all Docker layer caches. Use this to pick up new versions of
 claude-code or to recover from a broken image.
@@ -240,4 +240,4 @@ These are not gaps — the current behavior is intentionally designed this way �
 
 - **Image rebuild notification.** When claudecage is upgraded, the existing Docker image may be stale.
   `claudecage claude` should detect that the binary version is newer than the image it built and prompt the user to
-  recreate the image.
+  rebuild the image.

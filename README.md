@@ -17,7 +17,7 @@ optionally be injected as an environment variable for PR access (see Quickstart)
 
 ```
 cargo install --path .
-claudecage image create      # build the Docker image
+claudecage image build       # build the Docker image
 claudecage claude            # first run: type /login and complete the browser OAuth flow
 claudecage claude            # run claude in the current directory
 claudecage claude -- -p "fix the build"  # pass arguments to claude
@@ -48,10 +48,10 @@ the full security model around token handling.
 
 ## Image management
 
-- `claudecage image create` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew + gh) with a
+- `claudecage image build` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew + gh) with a
   non-root user matching the host user's uid/gid. Pass `--rebuild` to force rebuilding even if the image exists. Only
   needs to be run once.
-- `claudecage image recreate` — rebuilds the image from scratch with no Docker cache. Use after upgrading claudecage or
+- `claudecage image rebuild` — rebuilds the image from scratch with no Docker cache. Use after upgrading claudecage or
   when something is wrong with the image.
 
 ## How it runs
@@ -111,7 +111,7 @@ the next run. See [docs/security.md](docs/security.md) for the full threat model
 `CLAUDECAGE_TEST_CAPABILITIES` environment variable, which takes a comma-separated list of capabilities:
 
 - `docker` — Docker daemon is available. Assumes the claudecage image already exists (for fast local iteration).
-- `docker_build` — Implies `docker`. Enables the image build test (`image recreate`) and builds the image for any test
+- `docker_build` — Implies `docker`. Enables the image build test (`image rebuild`) and builds the image for any test
   that needs it. Use this in CI or when verifying Dockerfile changes.
 - `claude_auth` — Claude is authenticated inside the container (requires prior `/login` — see Quickstart). The image
   must already exist or `docker_build` must also be set.
