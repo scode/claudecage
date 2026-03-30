@@ -3,11 +3,11 @@
 //! # Capabilities
 //!
 //! - `docker` — Docker daemon is available. Tests that need a pre-built claudecage
-//!   image assume one already exists (e.g., from a prior `claudecage image create`).
+//!   image assume one already exists (e.g., from a prior `claudecage image build`).
 //!   Use this when iterating locally to skip the slow image build.
 //!
 //! - `docker_build` — Implies `docker`. Enables the image build test, which runs
-//!   `claudecage image recreate` (a full no-cache build). Other tests that need the
+//!   `claudecage image rebuild` (a full no-cache build). Other tests that need the
 //!   image will also trigger a build via `ensure_image()` when this capability is set.
 //!   Use this in CI or when you need to verify the Dockerfile itself.
 //!
@@ -41,10 +41,10 @@ fn ensure_image() {
     if common::capability_enabled("docker_build") {
         BUILD_IMAGE.call_once(|| {
             let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
-                .args(["image", "recreate"])
+                .args(["image", "rebuild"])
                 .status()
-                .expect("failed to run claudecage image recreate");
-            assert!(status.success(), "claudecage image recreate failed");
+                .expect("failed to run claudecage image rebuild");
+            assert!(status.success(), "claudecage image rebuild failed");
         });
     }
 }
@@ -81,7 +81,7 @@ fn inspect_missing_image_reports_no_such_image() {
 /// Only runs with the `docker_build` capability — skipped during fast local iteration
 /// where the image is assumed to already exist.
 #[test]
-fn image_recreate_builds_successfully() {
+fn image_rebuild_builds_successfully() {
     if !common::capability_enabled("docker_build") {
         return;
     }
@@ -95,7 +95,7 @@ fn image_recreate_builds_successfully() {
 
     assert!(
         inspect.status.success(),
-        "claudecage:latest should exist after image recreate"
+        "claudecage:latest should exist after image rebuild"
     );
 }
 
