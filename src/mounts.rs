@@ -34,6 +34,11 @@ pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathB
 /// container so that macOS-style paths like `/Users/alice` become
 /// Linux-conventional `/home/alice`.
 ///
+/// Symlink targets that overlap with read-write mounts are omitted to
+/// prevent read-only mounts from shadowing writable paths. The returned
+/// mounts are ordered with read-only mounts first so that Docker's
+/// last-mount-wins gives read-write mounts precedence when paths overlap.
+///
 /// Bails if `~/.claude` resolves to a path outside `$HOME`.
 pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Result<Vec<Mount>> {
     let home = home
@@ -128,7 +133,15 @@ pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Res
     // mounting for the symlinks to work inside the container.
     let targets = collect_symlink_targets(&claude_dir, &home)?;
     let deduped = deduplicate_ancestors(targets);
+
+    // Symlink targets that equal or fall inside an existing rw mount are
+    // redundant — the content is already visible read-write. Filter them
+    // out to avoid unnecessary bind mounts.
     for target in deduped {
+        if mounts.iter().any(|m| !m.readonly && target.starts_with(&m.host_path)) {
+            debug!(?target, "skipping symlink target inside rw mount");
+            continue;
+        }
         debug!(?target, "mounting symlink target");
         mounts.push(Mount {
             container_path: remap_path(&target, &home, container_home),
@@ -136,6 +149,13 @@ pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Res
             readonly: true,
         });
     }
+
+    // Docker bind mounts use last-mount-wins when paths overlap. Order ro
+    // mounts before rw mounts so that rw always takes precedence. This
+    // matters when a symlink target is an ancestor of the project directory
+    // — the ro ancestor mount provides visibility of sibling directories,
+    // while the later rw project mount ensures the project stays writable.
+    mounts.sort_by_key(|m| !m.readonly);
 
     Ok(mounts)
 }
@@ -320,16 +340,18 @@ mod tests {
         let ch = container_home();
         let mounts = resolve_mounts(&home, &ch, &project).unwrap();
 
-        // project (rw), .claude (rw), .claude.json (rw), external dir (ro).
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
         let home_canonical = home.canonicalize().unwrap();
-        assert_eq!(mounts[3].host_path, external_canonical);
+        let ext_mount = mounts
+            .iter()
+            .find(|m| m.host_path == external_canonical)
+            .expect("expected mount for external symlink target");
         assert_eq!(
-            mounts[3].container_path,
+            ext_mount.container_path,
             remap_path(&external_canonical, &home_canonical, &ch),
         );
-        assert!(mounts[3].readonly);
+        assert!(ext_mount.readonly);
     }
 
     #[test]
@@ -353,12 +375,15 @@ mod tests {
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
         let home_canonical = home.canonicalize().unwrap();
-        assert_eq!(mounts[3].host_path, external_canonical);
+        let ext_mount = mounts
+            .iter()
+            .find(|m| m.host_path == external_canonical)
+            .expect("expected mount for external symlink target");
         assert_eq!(
-            mounts[3].container_path,
+            ext_mount.container_path,
             remap_path(&external_canonical, &home_canonical, &ch),
         );
-        assert!(mounts[3].readonly);
+        assert!(ext_mount.readonly);
     }
 
     #[test]
@@ -592,5 +617,96 @@ mod tests {
         let paths = vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")];
         let result = deduplicate_ancestors(paths);
         assert_eq!(result, vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")]);
+    }
+
+    /// Symlink target that resolves to the project directory must not produce
+    /// an ro mount — the project is already mounted rw, and a later ro mount
+    /// would shadow it via Docker's last-mount-wins.
+    #[test]
+    fn resolve_mounts_skips_symlink_target_equal_to_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let claude_dir = home.join(".claude");
+        fs::create_dir(&claude_dir).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        unix_fs::symlink(&project, claude_dir.join("skills")).unwrap();
+
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+
+        let project_canonical = project.canonicalize().unwrap();
+        let project_mounts: Vec<_> = mounts
+            .iter()
+            .filter(|m| m.host_path == project_canonical)
+            .collect();
+        assert_eq!(project_mounts.len(), 1, "expected exactly one mount for the project dir");
+        assert!(!project_mounts[0].readonly, "project dir mount must be rw");
+    }
+
+    /// Symlink target inside the project directory must not produce an ro mount
+    /// — it's already visible via the project's rw mount.
+    #[test]
+    fn resolve_mounts_skips_symlink_target_inside_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let claude_dir = home.join(".claude");
+        fs::create_dir(&claude_dir).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+        let subdir = project.join("subdir");
+        fs::create_dir(&subdir).unwrap();
+
+        unix_fs::symlink(&subdir, claude_dir.join("skills")).unwrap();
+
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+
+        let subdir_canonical = subdir.canonicalize().unwrap();
+        let subdir_mounts: Vec<_> = mounts
+            .iter()
+            .filter(|m| m.host_path == subdir_canonical)
+            .collect();
+        assert!(subdir_mounts.is_empty(), "expected no mount for subdir inside project");
+    }
+
+    /// Symlink target that is an ancestor of the project directory should be
+    /// mounted ro, but must appear before the project's rw mount so that
+    /// Docker's last-mount-wins gives rw precedence for the project subtree.
+    #[test]
+    fn resolve_mounts_orders_ro_before_rw_for_ancestor_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let claude_dir = home.join(".claude");
+        fs::create_dir(&claude_dir).unwrap();
+        let parent = home.join("repos");
+        fs::create_dir(&parent).unwrap();
+        let project = parent.join("myproject");
+        fs::create_dir(&project).unwrap();
+
+        unix_fs::symlink(&parent, claude_dir.join("skills")).unwrap();
+
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+
+        let parent_canonical = parent.canonicalize().unwrap();
+        let project_canonical = project.canonicalize().unwrap();
+
+        let parent_idx = mounts
+            .iter()
+            .position(|m| m.host_path == parent_canonical)
+            .expect("expected ro mount for ancestor dir");
+        let project_idx = mounts
+            .iter()
+            .position(|m| m.host_path == project_canonical)
+            .expect("expected rw mount for project dir");
+
+        assert!(mounts[parent_idx].readonly, "ancestor mount must be ro");
+        assert!(!mounts[project_idx].readonly, "project mount must be rw");
+        assert!(
+            parent_idx < project_idx,
+            "ro ancestor mount (index {parent_idx}) must appear before rw project mount (index {project_idx})"
+        );
     }
 }

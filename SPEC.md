@@ -130,7 +130,11 @@ Only the following host paths are visible inside the container:
 - **Symlink targets from `~/.claude`**: top-level symlinks in `~/.claude` are resolved and their targets mounted
   read-only. This allows configurations like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json` to work
   transparently inside the container. Only direct children of `~/.claude` that are symlinks are followed — symlinks in
-  subdirectories are not resolved. Broken symlinks are silently skipped.
+  subdirectories are not resolved. Broken symlinks are silently skipped. When a symlink target overlaps with a
+  read-write mount (the project directory, `~/.claude`, or `~/.leiter`), the read-write mount takes precedence. If the
+  target equals or is inside an rw mount, the ro mount is omitted (it would be redundant). If the target is an ancestor
+  of an rw mount, both are mounted but ro mounts are ordered before rw mounts so that Docker's last-mount-wins gives
+  the rw mount precedence over the overlapping portion.
 
 Nothing else from the host is visible. In particular, `~/.ssh`, `~/.aws`, `~/.config`, browser profiles, and other
 credential stores are not accessible.
@@ -144,6 +148,10 @@ This means a process inside the container can create symlinks in `~/.claude` (wh
 directories under `$HOME`, and those directories will become visible (read-only) on the next claudecage invocation. This
 is an intentional tradeoff — `~/.claude` must be writable for claude to function, and the `$HOME` boundary limits the
 exposure. A future improvement may make the set of allowed symlink target directories configurable.
+
+To prevent read-only symlink target mounts from shadowing read-write mounts, claudecage orders all read-only mounts
+before read-write mounts in the Docker invocation. Docker's bind mount semantics give the last mount precedence when
+paths overlap, so this ordering ensures read-write access is never downgraded by a symlink target mount.
 
 ### Privilege restrictions
 
