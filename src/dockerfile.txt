@@ -34,7 +34,7 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
     LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install dprint gh scode/dist-tap/leiter rust
+RUN brew install dprint gh sapling scode/dist-tap/leiter rust
 
 # TODO: stax v0.37.0 lacks linux-aarch64 binaries. The release after v0.37.0
 # should include them — replace this clone-and-build with `brew install scode/dist-tap/stax`.
