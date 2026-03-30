@@ -26,9 +26,9 @@ pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathB
 /// The project directory is mounted read-write so claude can modify code.
 /// `~/.claude` is created if absent and
 /// mounted read-write so auth, sessions, and settings persist across
-/// ephemeral container runs. Top-level symlinks in `~/.claude` are resolved
-/// and their targets mounted read-only so those symlinks work inside the
-/// container. Nested symlinks are not followed.
+/// ephemeral container runs. Symlinks anywhere within `~/.claude` are
+/// recursively resolved and their targets mounted read-only so those
+/// symlinks work inside the container.
 ///
 /// Host paths under `home` are remapped to `container_home` inside the
 /// container so that macOS-style paths like `/Users/alice` become
@@ -163,48 +163,55 @@ pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Res
     Ok(mounts)
 }
 
-/// Walk top-level entries in a directory and resolve symlinks. File symlinks
-/// resolve to their parent directory; directory symlinks resolve to the
-/// directory itself. Broken symlinks and targets outside `home` are skipped
-/// with a debug log — the latter prevents a compromised container from
-/// crafting symlinks that expose arbitrary host paths on the next run.
+/// Recursively walk a directory and resolve symlinks. File symlinks resolve
+/// to their parent directory; directory symlinks resolve to the directory
+/// itself. Non-symlink subdirectories are descended into so that nested
+/// symlinks (e.g. individual skill symlinks inside `~/.claude/skills/`) are
+/// discovered. Broken symlinks and targets outside `home` are skipped with a
+/// debug log — the latter prevents a compromised container from crafting
+/// symlinks that expose arbitrary host paths on the next run.
 fn collect_symlink_targets(dir: &Path, home: &Path) -> Result<Vec<PathBuf>> {
+    let root = dir;
     let mut targets = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
 
-    let entries = std::fs::read_dir(dir).context("failed to read ~/.claude")?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
+    while let Some(current) = stack.pop() {
+        let entries = std::fs::read_dir(&current)
+            .with_context(|| format!("failed to read {}", current.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = path.symlink_metadata()?;
 
-        if !path.symlink_metadata()?.file_type().is_symlink() {
-            continue;
-        }
+            if meta.file_type().is_symlink() {
+                let resolved = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        debug!(?path, "skipping broken symlink");
+                        continue;
+                    }
+                };
 
-        let resolved = match path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                debug!(?path, "skipping broken symlink");
-                continue;
+                let target_dir = if resolved.is_dir() {
+                    resolved
+                } else {
+                    resolved.parent().map(Path::to_path_buf).unwrap_or(resolved)
+                };
+
+                if target_dir.starts_with(root) {
+                    debug!(?target_dir, "skipping symlink target inside ~/.claude");
+                    continue;
+                }
+                if !target_dir.starts_with(home) {
+                    debug!(?target_dir, "skipping symlink target outside home");
+                    continue;
+                }
+
+                targets.push(target_dir);
+            } else if meta.is_dir() {
+                stack.push(path);
             }
-        };
-
-        let target_dir = if resolved.is_dir() {
-            resolved
-        } else {
-            resolved.parent().map(Path::to_path_buf).unwrap_or(resolved)
-        };
-
-        // Skip targets inside ~/.claude (already mounted rw) or outside $HOME.
-        if target_dir.starts_with(dir) {
-            debug!(?target_dir, "skipping symlink target inside ~/.claude");
-            continue;
         }
-        if !target_dir.starts_with(home) {
-            debug!(?target_dir, "skipping symlink target outside home");
-            continue;
-        }
-
-        targets.push(target_dir);
     }
 
     Ok(targets)
@@ -620,6 +627,97 @@ mod tests {
         let paths = vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")];
         let result = deduplicate_ancestors(paths);
         assert_eq!(result, vec![PathBuf::from("/a/b"), PathBuf::from("/a/bc")]);
+    }
+
+    /// Symlinks nested inside a real subdirectory of ~/.claude (e.g.
+    /// ~/.claude/skills/foo -> ~/git/foo) must be discovered and mounted.
+    #[test]
+    fn resolve_mounts_follows_nested_symlinks_in_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let claude_dir = home.join(".claude");
+        fs::create_dir(&claude_dir).unwrap();
+        let skills_dir = claude_dir.join("skills");
+        fs::create_dir(&skills_dir).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        // Two external repos that nested skill symlinks point to.
+        let voice_repo = home.join("git").join("voice");
+        fs::create_dir_all(&voice_repo).unwrap();
+        let graphite_repo = home.join("git").join("graphite-skill");
+        fs::create_dir_all(&graphite_repo).unwrap();
+
+        unix_fs::symlink(&voice_repo, skills_dir.join("voice")).unwrap();
+        unix_fs::symlink(&graphite_repo, skills_dir.join("graphite")).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let home_canonical = home.canonicalize().unwrap();
+
+        let voice_canonical = voice_repo.canonicalize().unwrap();
+        let graphite_canonical = graphite_repo.canonicalize().unwrap();
+
+        let voice_mount = mounts
+            .iter()
+            .find(|m| m.host_path == voice_canonical)
+            .expect("expected mount for nested voice symlink target");
+        assert!(voice_mount.readonly);
+        assert_eq!(
+            voice_mount.container_path,
+            remap_path(&voice_canonical, &home_canonical, &ch),
+        );
+
+        let graphite_mount = mounts
+            .iter()
+            .find(|m| m.host_path == graphite_canonical)
+            .expect("expected mount for nested graphite symlink target");
+        assert!(graphite_mount.readonly);
+        assert_eq!(
+            graphite_mount.container_path,
+            remap_path(&graphite_canonical, &home_canonical, &ch),
+        );
+    }
+
+    /// The recursive traversal must not follow symlinks to directories — only
+    /// real (non-symlink) subdirectories are descended into. This prevents
+    /// infinite loops from circular symlinks and ensures traversal stays
+    /// within ~/.claude.
+    #[test]
+    fn resolve_mounts_does_not_traverse_into_symlinked_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let claude_dir = home.join(".claude");
+        fs::create_dir(&claude_dir).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        // Create an external dir with a nested symlink inside it.
+        let external = home.join("external");
+        fs::create_dir(&external).unwrap();
+        let nested = home.join("nested-target");
+        fs::create_dir(&nested).unwrap();
+        unix_fs::symlink(&nested, external.join("deep-link")).unwrap();
+
+        // Symlink ~/.claude/ext -> external. The traversal should resolve
+        // this symlink but NOT descend into external/ to find deep-link.
+        unix_fs::symlink(&external, claude_dir.join("ext")).unwrap();
+
+        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+
+        let external_canonical = external.canonicalize().unwrap();
+        let nested_canonical = nested.canonicalize().unwrap();
+
+        assert!(
+            mounts.iter().any(|m| m.host_path == external_canonical),
+            "expected mount for direct symlink target"
+        );
+        assert!(
+            !mounts.iter().any(|m| m.host_path == nested_canonical),
+            "must not mount targets found by traversing into symlinked dirs"
+        );
     }
 
     /// Symlink target that resolves to the project directory must not produce
