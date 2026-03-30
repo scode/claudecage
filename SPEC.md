@@ -127,14 +127,15 @@ Only the following host paths are visible inside the container:
   configuration inside the container. If `~/.gitconfig` is a symlink, its resolved path must be under `$HOME` or it is
   silently skipped.
 
-- **Symlink targets from `~/.claude`**: top-level symlinks in `~/.claude` are resolved and their targets mounted
-  read-only. This allows configurations like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json` to work
-  transparently inside the container. Only direct children of `~/.claude` that are symlinks are followed — symlinks in
-  subdirectories are not resolved. Broken symlinks are silently skipped. When a symlink target overlaps with a
-  read-write mount (the project directory, `~/.claude`, or `~/.leiter`), the read-write mount takes precedence. If the
-  target equals or is inside an rw mount, the ro mount is omitted (it would be redundant). If the target is an ancestor
-  of an rw mount, both are mounted but ro mounts are ordered before rw mounts so that Docker's last-mount-wins gives the
-  rw mount precedence over the overlapping portion.
+- **Symlink targets from `~/.claude`**: symlinks anywhere within `~/.claude` are recursively resolved and their targets
+  mounted read-only. This allows configurations like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json` and
+  individual skill symlinks like `~/.claude/skills/foo -> ~/git/foo` to work transparently inside the container. Only
+  symlinks are resolved — the recursive traversal descends into real (non-symlink) subdirectories but does not follow
+  symlinks to directories, preventing cycles and keeping traversal within `~/.claude`. Broken symlinks are silently
+  skipped. When a symlink target overlaps with a read-write mount (the project directory, `~/.claude`, or `~/.leiter`),
+  the read-write mount takes precedence. If the target equals or is inside an rw mount, the ro mount is omitted (it
+  would be redundant). If the target is an ancestor of an rw mount, both are mounted but ro mounts are ordered before rw
+  mounts so that Docker's last-mount-wins gives the rw mount precedence over the overlapping portion.
 
 Nothing else from the host is visible. In particular, `~/.ssh`, `~/.aws`, `~/.config`, browser profiles, and other
 credential stores are not accessible.
@@ -233,9 +234,6 @@ These are areas where the current behavior is acceptable but could be improved:
 ## Potential future improvements
 
 These are not gaps — the current behavior is intentionally designed this way — but they may be worth revisiting:
-
-- **Nested symlink resolution.** Currently only top-level symlinks in `~/.claude` are followed. Resolving symlinks in
-  subdirectories would handle more complex configurations but increases the surface area of what gets mounted.
 
 - **Configurable symlink targets.** An allowlist of permitted symlink target directories (rather than accepting anything
   under `$HOME`) would reduce the mount expansion risk from writable `~/.claude`.
