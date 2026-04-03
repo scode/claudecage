@@ -45,6 +45,11 @@ pub fn build_image(no_cache: bool) -> Result<()> {
     let uid = nix::unistd::getuid().as_raw().to_string();
     let gid = nix::unistd::getgid().as_raw().to_string();
     let username = std::env::var("USER").context("USER environment variable not set")?;
+    let host_home = dirs::home_dir()
+        .context("could not determine home directory")?
+        .to_str()
+        .context("home directory is not valid UTF-8")?
+        .to_string();
 
     info!("building Docker image {IMAGE_NAME}");
 
@@ -58,6 +63,8 @@ pub fn build_image(no_cache: bool) -> Result<()> {
         &format!("UID={uid}"),
         "--build-arg",
         &format!("GID={gid}"),
+        "--build-arg",
+        &format!("HOST_HOME={host_home}"),
     ]);
     if no_cache {
         cmd.arg("--no-cache");
