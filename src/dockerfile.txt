@@ -3,6 +3,7 @@ FROM ubuntu:24.04
 ARG USERNAME
 ARG UID
 ARG GID
+ARG HOST_HOME
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -41,9 +42,17 @@ RUN brew install dprint gh sapling scode/dist-tap/leiter rust
 RUN cargo install --git https://github.com/cesarferreira/stax.git --tag v0.37.0 \
     && ln -s ~/.cargo/bin/stax /home/linuxbrew/.linuxbrew/bin/stax
 
-# Remove temporary sudo grant and configure system-level git settings.
+# Remove temporary sudo grant, configure system-level git settings, and
+# create a symlink from the host home path to the container home path.
+# Some tools (e.g., Claude Code plugins) persist absolute host paths in
+# config files; the symlink lets those paths resolve inside the container.
 USER root
 RUN rm /etc/sudoers.d/brew-install
+RUN CONTAINER_HOME="/home/${USERNAME}" \
+    && if [ "${HOST_HOME}" != "${CONTAINER_HOME}" ]; then \
+         mkdir -p "$(dirname "${HOST_HOME}")" \
+         && ln -s "${CONTAINER_HOME}" "${HOST_HOME}"; \
+       fi
 
 # Configure gh as git credential helper so git push works via GH_TOKEN
 # without user setup. Written directly because `gh auth setup-git` requires

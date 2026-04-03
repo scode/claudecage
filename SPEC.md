@@ -215,6 +215,11 @@ directory is `/home/<username>`, so a host path like `/Users/alice/src/myproject
 inside the container. This means paths in claude's output use Linux-style paths that differ from the host — a tradeoff
 for having a standard Linux filesystem layout inside the container.
 
+To support tools that persist absolute host paths in config files (e.g., Claude Code plugin metadata), the image
+includes a symlink from the host home path to the container home path when they differ (e.g., `/Users/alice` ->
+`/home/alice`). This allows those hardcoded paths to resolve inside the container without rewriting config files at
+startup.
+
 ## Known gaps
 
 These are areas where the current behavior is acceptable but could be improved:
