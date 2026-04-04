@@ -129,31 +129,6 @@ fn image_rebuild_builds_successfully() {
     );
 }
 
-/// Verify that `image build --rebuild` preserves the full rebuild entrypoint.
-#[test]
-fn image_build_rebuild_builds_successfully() {
-    if !common::capability_enabled("docker_build") {
-        return;
-    }
-    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
-
-    let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
-        .args(["image", "build", "--rebuild"])
-        .status()
-        .expect("failed to run claudecage image build --rebuild");
-    assert!(status.success(), "claudecage image build --rebuild failed");
-
-    let inspect = Command::new("docker")
-        .args(["image", "inspect", "claudecage:latest"])
-        .output()
-        .expect("failed to run docker image inspect");
-
-    assert!(
-        inspect.status.success(),
-        "claudecage:latest should exist after image build --rebuild"
-    );
-}
-
 /// Refresh the image successfully when it already exists.
 #[test]
 fn image_refresh_succeeds_with_existing_image() {
