@@ -61,11 +61,7 @@ enum Command {
 #[derive(Subcommand)]
 enum ImageAction {
     /// Build the Docker image.
-    Build {
-        /// Rebuild the image from scratch with no Docker cache.
-        #[arg(long)]
-        rebuild: bool,
-    },
+    Build,
     /// Refresh Claude Code and stax while preserving cached base layers.
     Refresh,
     /// Rebuild the image from scratch (no cache).
@@ -162,13 +158,13 @@ fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)>
 
 fn run_image_action(action: ImageAction) -> Result<()> {
     match action {
-        ImageAction::Build { rebuild: true } | ImageAction::Rebuild => {
+        ImageAction::Rebuild => {
             docker::build_image(docker::BuildMode::Rebuild)?;
         }
         ImageAction::Refresh => {
             docker::build_image(docker::BuildMode::Refresh)?;
         }
-        ImageAction::Build { rebuild: false } => {
+        ImageAction::Build => {
             if docker::image_exists()? {
                 info!(
                     "image already exists (use 'claudecage image refresh' to refresh Claude/stax or 'claudecage image rebuild' to rebuild from scratch)"
