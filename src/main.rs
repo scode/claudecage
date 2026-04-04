@@ -66,6 +66,8 @@ enum ImageAction {
         #[arg(long)]
         rebuild: bool,
     },
+    /// Refresh Claude Code and stax while preserving cached base layers.
+    Refresh,
     /// Rebuild the image from scratch (no cache).
     Rebuild,
 }
@@ -158,6 +160,46 @@ fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)>
     resolve_mounts(home)
 }
 
+/// Decide whether an image command should run a build and which cache policy it needs.
+fn image_build_mode(action: &ImageAction, image_exists: bool) -> Option<docker::BuildMode> {
+    match action {
+        ImageAction::Build { rebuild } => {
+            if *rebuild {
+                Some(docker::BuildMode::Rebuild)
+            } else if image_exists {
+                None
+            } else {
+                Some(docker::BuildMode::Build)
+            }
+        }
+        ImageAction::Refresh => Some(docker::BuildMode::Refresh),
+        ImageAction::Rebuild => Some(docker::BuildMode::Rebuild),
+    }
+}
+
+fn run_image_action(action: ImageAction) -> Result<()> {
+    match action {
+        ImageAction::Build { rebuild: true } | ImageAction::Rebuild => {
+            docker::build_image(docker::BuildMode::Rebuild)?;
+        }
+        ImageAction::Refresh => {
+            docker::build_image(docker::BuildMode::Refresh)?;
+        }
+        ImageAction::Build { rebuild: false } => {
+            match image_build_mode(&action, docker::image_exists()?) {
+                Some(mode) => docker::build_image(mode)?,
+                None => {
+                    info!(
+                    "image already exists (use 'claudecage image refresh' to refresh Claude/stax or 'claudecage image rebuild' to rebuild from scratch)"
+                );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
@@ -169,18 +211,7 @@ fn run() -> Result<ExitCode> {
 
     match cli.command {
         Command::Image { action } => {
-            match action {
-                ImageAction::Build { rebuild } => {
-                    if rebuild || !docker::image_exists()? {
-                        docker::build_image(false)?;
-                    } else {
-                        info!("image already exists (use 'claudecage image rebuild' to rebuild from scratch)");
-                    }
-                }
-                ImageAction::Rebuild => {
-                    docker::build_image(true)?;
-                }
-            }
+            run_image_action(action)?;
             Ok(ExitCode::SUCCESS)
         }
         ref cmd @ (Command::Claude { .. } | Command::Shell { .. } | Command::Run { .. }) => {
@@ -282,5 +313,41 @@ mod tests {
     fn log_level_verbose_and_quiet_cancel() {
         assert_eq!(log_level(1, 1), LevelFilter::INFO);
         assert_eq!(log_level(2, 1), LevelFilter::DEBUG);
+    }
+
+    #[test]
+    fn image_build_mode_skips_cached_build_when_image_exists() {
+        assert_eq!(
+            image_build_mode(&ImageAction::Build { rebuild: false }, true),
+            None
+        );
+    }
+
+    #[test]
+    fn image_build_mode_builds_missing_image() {
+        assert_eq!(
+            image_build_mode(&ImageAction::Build { rebuild: false }, false),
+            Some(docker::BuildMode::Build)
+        );
+    }
+
+    #[test]
+    fn image_build_mode_restores_build_rebuild_semantics() {
+        assert_eq!(
+            image_build_mode(&ImageAction::Build { rebuild: true }, true),
+            Some(docker::BuildMode::Rebuild)
+        );
+    }
+
+    #[test]
+    fn image_build_mode_refresh_does_not_depend_on_existing_image() {
+        assert_eq!(
+            image_build_mode(&ImageAction::Refresh, true),
+            Some(docker::BuildMode::Refresh)
+        );
+        assert_eq!(
+            image_build_mode(&ImageAction::Refresh, false),
+            Some(docker::BuildMode::Refresh)
+        );
     }
 }

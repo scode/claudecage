@@ -9,7 +9,9 @@
 //! - `docker_build` — Implies `docker`. Enables the image build test, which runs
 //!   `claudecage image rebuild` (a full no-cache build). Other tests that need the
 //!   image will also trigger a build via `ensure_image()` when this capability is set.
-//!   Use this in CI or when you need to verify the Dockerfile itself.
+//!   Use this in CI or when you need to verify the Dockerfile itself. Tests may also
+//!   exercise `claudecage image refresh`, which should succeed against the same image
+//!   tag used by normal runs.
 //!
 //! - `claude_auth` — Claude is authenticated inside the container (requires prior
 //!   `/login`). The image must already exist or `docker_build` must also be set.
@@ -30,11 +32,13 @@
 mod common;
 
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::Once;
 
 // All integration tests live in one binary so this Once synchronizes image
 // creation across tests that run in parallel within the binary.
 static BUILD_IMAGE: Once = Once::new();
+static IMAGE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build the image if `docker_build` is enabled, otherwise assume it exists.
 fn ensure_image() {
@@ -47,6 +51,23 @@ fn ensure_image() {
             assert!(status.success(), "claudecage image rebuild failed");
         });
     }
+}
+
+fn remove_claudecage_image_if_present() {
+    let inspect = Command::new("docker")
+        .args(["image", "inspect", "claudecage:latest"])
+        .output()
+        .expect("failed to run docker image inspect");
+
+    if !inspect.status.success() {
+        return;
+    }
+
+    let remove = Command::new("docker")
+        .args(["image", "rm", "-f", "claudecage:latest"])
+        .status()
+        .expect("failed to run docker image rm");
+    assert!(remove.success(), "docker image rm claudecage:latest failed");
 }
 
 // --- docker capability tests ---
@@ -85,6 +106,7 @@ fn image_rebuild_builds_successfully() {
     if !common::capability_enabled("docker_build") {
         return;
     }
+    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
 
     ensure_image();
 
@@ -96,6 +118,58 @@ fn image_rebuild_builds_successfully() {
     assert!(
         inspect.status.success(),
         "claudecage:latest should exist after image rebuild"
+    );
+}
+
+/// Verify that `image build --rebuild` preserves the full rebuild entrypoint.
+#[test]
+fn image_build_rebuild_builds_successfully() {
+    if !common::capability_enabled("docker_build") {
+        return;
+    }
+    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+        .args(["image", "build", "--rebuild"])
+        .status()
+        .expect("failed to run claudecage image build --rebuild");
+    assert!(status.success(), "claudecage image build --rebuild failed");
+
+    let inspect = Command::new("docker")
+        .args(["image", "inspect", "claudecage:latest"])
+        .output()
+        .expect("failed to run docker image inspect");
+
+    assert!(
+        inspect.status.success(),
+        "claudecage:latest should exist after image build --rebuild"
+    );
+}
+
+/// Refresh the image successfully even when the expected tag is absent.
+#[test]
+fn image_refresh_builds_successfully() {
+    if !common::capability_enabled("docker_build") {
+        return;
+    }
+    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
+
+    remove_claudecage_image_if_present();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+        .args(["image", "refresh"])
+        .status()
+        .expect("failed to run claudecage image refresh");
+    assert!(status.success(), "claudecage image refresh failed");
+
+    let inspect = Command::new("docker")
+        .args(["image", "inspect", "claudecage:latest"])
+        .output()
+        .expect("failed to run docker image inspect");
+
+    assert!(
+        inspect.status.success(),
+        "claudecage:latest should exist after image refresh"
     );
 }
 
@@ -137,6 +211,7 @@ fn claude_responds_to_prompt() {
     if !common::capability_enabled("claude_auth") {
         return;
     }
+    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
 
     ensure_image();
 

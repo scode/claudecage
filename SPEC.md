@@ -81,19 +81,30 @@ Remove the stored GitHub token from the Keychain. Exits successfully whether or 
 
 ### `claudecage image build [--rebuild]`
 
-Build the Docker image if it does not already exist. If `--rebuild` is passed, rebuild the image even if it exists.
+Build the Docker image if it does not already exist. If `--rebuild` is passed, rebuild it from scratch with no Docker
+cache even if it already exists.
 
 The image must include a non-root user matching the host user's uid and gid so that claude does not run as root inside
 the container.
 
-The image includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, `rust`, and `stax` via Homebrew. `gh` is configured
-as the git credential helper so that `git push` and other git operations use `GH_TOKEN` when it is set. `leiter` is a
-personal preference — a future improvement should make the set of Homebrew-installed tools configurable.
+The image includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, and `rust` via Homebrew in stable cached layers.
+`gh` is configured as the git credential helper so that `git push` and other git operations use `GH_TOKEN` when it is
+set. `leiter` is a personal preference — a future improvement should make the set of Homebrew-installed tools
+configurable.
+
+Claude Code and `stax` are installed in refreshable tail layers so they can be updated without discarding the rest of
+the Docker cache.
+
+### `claudecage image refresh`
+
+Rebuild the Docker image while preserving cached base layers but forcing Claude Code and `stax` to reinstall.
+
+If the image does not exist yet, `image refresh` builds it.
 
 ### `claudecage image rebuild`
 
 Rebuild the Docker image from scratch, bypassing all Docker layer caches. Use this to pick up new versions of
-claude-code or to recover from a broken image.
+claude-code, `stax`, or any other image dependency, or to recover from a broken image.
 
 ### Verbosity
 
