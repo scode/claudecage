@@ -79,10 +79,9 @@ This overwrites any previously stored token.
 
 Remove the stored GitHub token from the Keychain. Exits successfully whether or not a token was previously stored.
 
-### `claudecage image build [--rebuild]`
+### `claudecage image build`
 
-Build the Docker image if it does not already exist. If `--rebuild` is passed, rebuild it from scratch with no Docker
-cache even if it already exists.
+Build the Docker image if it does not already exist.
 
 The image must include a non-root user matching the host user's uid and gid so that claude does not run as root inside
 the container.
