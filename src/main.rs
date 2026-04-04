@@ -62,10 +62,12 @@ enum Command {
 enum ImageAction {
     /// Build the Docker image.
     Build {
-        /// Rebuild the image even if it already exists.
+        /// Rebuild the image from scratch with no Docker cache.
         #[arg(long)]
         rebuild: bool,
     },
+    /// Refresh Claude Code and stax while preserving cached base layers.
+    Refresh,
     /// Rebuild the image from scratch (no cache).
     Rebuild,
 }
@@ -158,6 +160,28 @@ fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)>
     resolve_mounts(home)
 }
 
+fn run_image_action(action: ImageAction) -> Result<()> {
+    match action {
+        ImageAction::Build { rebuild: true } | ImageAction::Rebuild => {
+            docker::build_image(docker::BuildMode::Rebuild)?;
+        }
+        ImageAction::Refresh => {
+            docker::build_image(docker::BuildMode::Refresh)?;
+        }
+        ImageAction::Build { rebuild: false } => {
+            if docker::image_exists()? {
+                info!(
+                    "image already exists (use 'claudecage image refresh' to refresh Claude/stax or 'claudecage image rebuild' to rebuild from scratch)"
+                );
+            } else {
+                docker::build_image(docker::BuildMode::Build)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
@@ -169,18 +193,7 @@ fn run() -> Result<ExitCode> {
 
     match cli.command {
         Command::Image { action } => {
-            match action {
-                ImageAction::Build { rebuild } => {
-                    if rebuild || !docker::image_exists()? {
-                        docker::build_image(false)?;
-                    } else {
-                        info!("image already exists (use 'claudecage image rebuild' to rebuild from scratch)");
-                    }
-                }
-                ImageAction::Rebuild => {
-                    docker::build_image(true)?;
-                }
-            }
+            run_image_action(action)?;
             Ok(ExitCode::SUCCESS)
         }
         ref cmd @ (Command::Claude { .. } | Command::Shell { .. } | Command::Run { .. }) => {
