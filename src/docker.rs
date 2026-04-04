@@ -1,8 +1,10 @@
 use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
@@ -11,6 +13,21 @@ use crate::mounts::Mount;
 
 const IMAGE_NAME: &str = "claudecage:latest";
 const DOCKERFILE: &str = include_str!("dockerfile.txt");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildMode {
+    Build,
+    Refresh,
+    Rebuild,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct BuildContext {
+    username: String,
+    uid: String,
+    gid: String,
+    host_home: String,
+}
 
 pub fn image_exists() -> Result<bool> {
     let output = Command::new("docker")
@@ -37,39 +54,31 @@ pub fn image_exists() -> Result<bool> {
 ///
 /// The image includes a non-root user matching the host user's uid/gid
 /// so claude doesn't refuse to run (it rejects root).
-pub fn build_image(no_cache: bool) -> Result<()> {
+pub fn build_image(mode: BuildMode) -> Result<()> {
     let tmp = tempfile::tempdir().context("failed to create temp dir for Dockerfile")?;
     let dockerfile_path = tmp.path().join("Dockerfile");
     std::fs::write(&dockerfile_path, DOCKERFILE).context("failed to write Dockerfile")?;
 
-    let uid = nix::unistd::getuid().as_raw().to_string();
-    let gid = nix::unistd::getgid().as_raw().to_string();
-    let username = std::env::var("USER").context("USER environment variable not set")?;
-    let host_home = dirs::home_dir()
-        .context("could not determine home directory")?
-        .to_str()
-        .context("home directory is not valid UTF-8")?
-        .to_string();
+    let build_context = BuildContext {
+        uid: nix::unistd::getuid().as_raw().to_string(),
+        gid: nix::unistd::getgid().as_raw().to_string(),
+        username: std::env::var("USER").context("USER environment variable not set")?,
+        host_home: dirs::home_dir()
+            .context("could not determine home directory")?
+            .to_str()
+            .context("home directory is not valid UTF-8")?
+            .to_string(),
+    };
 
     info!("building Docker image {IMAGE_NAME}");
 
     let mut cmd = Command::new("docker");
-    cmd.args(["build", "-t", IMAGE_NAME, "-f"]);
-    cmd.arg(&dockerfile_path);
-    cmd.args([
-        "--build-arg",
-        &format!("USERNAME={username}"),
-        "--build-arg",
-        &format!("UID={uid}"),
-        "--build-arg",
-        &format!("GID={gid}"),
-        "--build-arg",
-        &format!("HOST_HOME={host_home}"),
-    ]);
-    if no_cache {
-        cmd.arg("--no-cache");
-    }
-    cmd.arg(tmp.path());
+    cmd.args(build_command_args(
+        mode,
+        &dockerfile_path,
+        tmp.path(),
+        &build_context,
+    ));
 
     let status = cmd.status().context("failed to run docker build")?;
 
@@ -78,6 +87,46 @@ pub fn build_image(no_cache: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn build_command_args(
+    mode: BuildMode,
+    dockerfile_path: &Path,
+    context_path: &Path,
+    build_context: &BuildContext,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("build"),
+        OsString::from("-t"),
+        OsString::from(IMAGE_NAME),
+        OsString::from("-f"),
+        dockerfile_path.as_os_str().to_os_string(),
+        OsString::from("--build-arg"),
+        OsString::from(format!("USERNAME={}", build_context.username)),
+        OsString::from("--build-arg"),
+        OsString::from(format!("UID={}", build_context.uid)),
+        OsString::from("--build-arg"),
+        OsString::from(format!("GID={}", build_context.gid)),
+        OsString::from("--build-arg"),
+        OsString::from(format!("HOST_HOME={}", build_context.host_home)),
+    ];
+
+    if mode == BuildMode::Refresh {
+        let refresh_marker = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos().to_string())
+            .unwrap_or_else(|_| format!("fallback-{}", std::process::id()));
+        args.push(OsString::from("--build-arg"));
+        args.push(OsString::from(format!("REFRESH_MARKER={refresh_marker}")));
+    }
+
+    if mode == BuildMode::Rebuild {
+        args.push(OsString::from("--no-cache"));
+        args.push(OsString::from("--pull"));
+    }
+
+    args.push(context_path.as_os_str().to_os_string());
+    args
 }
 
 /// Write env vars in docker `--env-file` format (`KEY=VALUE\n` per entry).
@@ -192,6 +241,15 @@ pub fn run_container(
 mod tests {
     use super::*;
 
+    fn build_context() -> BuildContext {
+        BuildContext {
+            username: "alice".to_string(),
+            uid: "1000".to_string(),
+            gid: "1000".to_string(),
+            host_home: "/Users/alice".to_string(),
+        }
+    }
+
     #[test]
     fn write_env_file_single_var() {
         let mut buf = Vec::new();
@@ -211,5 +269,45 @@ mod tests {
         let mut buf = Vec::new();
         write_env_file(&mut buf, &[]).unwrap();
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn build_mode_uses_cached_layers_without_refresh_arg() {
+        let args = build_command_args(
+            BuildMode::Build,
+            Path::new("/tmp/Dockerfile"),
+            Path::new("/tmp/context"),
+            &build_context(),
+        );
+
+        assert!(!args.iter().any(|arg| arg == "--no-cache"));
+        assert!(!args.iter().any(|arg| arg.to_string_lossy().starts_with("REFRESH_MARKER=")));
+    }
+
+    #[test]
+    fn refresh_mode_adds_refresh_arg_without_no_cache() {
+        let args = build_command_args(
+            BuildMode::Refresh,
+            Path::new("/tmp/Dockerfile"),
+            Path::new("/tmp/context"),
+            &build_context(),
+        );
+
+        assert!(!args.iter().any(|arg| arg == "--no-cache"));
+        assert!(args.iter().any(|arg| arg.to_string_lossy().starts_with("REFRESH_MARKER=")));
+    }
+
+    #[test]
+    fn rebuild_mode_uses_no_cache_without_refresh_arg() {
+        let args = build_command_args(
+            BuildMode::Rebuild,
+            Path::new("/tmp/Dockerfile"),
+            Path::new("/tmp/context"),
+            &build_context(),
+        );
+
+        assert!(args.iter().any(|arg| arg == "--no-cache"));
+        assert!(args.iter().any(|arg| arg == "--pull"));
+        assert!(!args.iter().any(|arg| arg.to_string_lossy().starts_with("REFRESH_MARKER=")));
     }
 }
