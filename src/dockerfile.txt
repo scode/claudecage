@@ -35,12 +35,7 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
     LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install dprint gh sapling scode/dist-tap/leiter rust
-
-# TODO: stax v0.37.0 lacks linux-aarch64 binaries. The release after v0.37.0
-# should include them — replace this clone-and-build with `brew install scode/dist-tap/stax`.
-RUN cargo install --git https://github.com/cesarferreira/stax.git --tag v0.37.0 \
-    && ln -s ~/.cargo/bin/stax /home/linuxbrew/.linuxbrew/bin/stax
+RUN brew install dprint gh sapling scode/dist-tap/leiter cesarferreira/tap/stax rust
 
 # Remove temporary sudo grant, configure system-level git settings, and
 # create a symlink from the host home path to the container home path.
