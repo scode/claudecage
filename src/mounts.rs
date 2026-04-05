@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use tracing::debug;
 
-const CLAUDE_CONTAINER_STATE_DIR: &str = ".claudecage";
+pub(crate) const CLAUDE_CONTAINER_STATE_DIR: &str = ".claudecage";
 const CLAUDE_CONTAINER_STATE_FILE: &str = "claude.json";
 
 /// A bind mount for `docker run`.
@@ -277,7 +277,17 @@ fn claude_container_state_file(home: &Path, materialize_state: bool) -> Result<P
 /// this path could be redirected into `~/.claude`, `~/.codex`, or some other
 /// agent-writable location, a compromised session could rewrite the very files
 /// that are supposed to gate later launches.
-fn claudecage_state_dir(home: &Path, materialize_state: bool) -> Result<PathBuf> {
+/// Resolve claudecage-owned host state and reject indirection.
+///
+/// Both Claude's container-only runtime state and the mount-approval baselines
+/// live under `~/.claudecage`. That directory is a trust anchor. If it could
+/// be redirected through a symlink into `~/.claude`, `~/.codex`, or some other
+/// agent-writable path, a compromised session could rewrite the state that is
+/// supposed to protect later launches.
+pub(crate) fn claudecage_state_dir(home: &Path, materialize_state: bool) -> Result<PathBuf> {
+    let home = home
+        .canonicalize()
+        .context("failed to resolve home directory")?;
     let state_dir = home.join(CLAUDE_CONTAINER_STATE_DIR);
     if state_dir.exists() {
         let meta = state_dir

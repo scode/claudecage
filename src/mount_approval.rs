@@ -10,9 +10,9 @@
 //! text format, and compares the two with `diff -u`. If they differ, launch
 //! stops until the user explicitly approves the new set. The project mount is
 //! deliberately excluded so moving between repositories does not create prompt
-//! spam, and Codex's visible-path alias mount is excluded for the same reason.
+//! spam. Codex's visible-path alias mount falls out of that same filter because
+//! it reuses the real project host path with a second container target.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -21,9 +21,8 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use tempfile::NamedTempFile;
 
-use crate::mounts::Mount;
+use crate::mounts::{self, Mount};
 
-const CLAUDECAGE_STATE_DIR: &str = ".claudecage";
 const APPROVED_MOUNTS_DIR: &str = "approved-mounts";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +36,7 @@ pub enum ApprovalProfile {
 }
 
 impl ApprovalProfile {
+    #[cfg(test)]
     /// Return the on-disk path of the approval baseline for this profile.
     ///
     /// The baseline lives under claudecage-owned state rather than inside an
@@ -44,7 +44,7 @@ impl ApprovalProfile {
     /// `~/.codex`, the container could rewrite the thing that is supposed to
     /// protect later launches.
     pub fn snapshot_path(self, home: &Path) -> PathBuf {
-        home.join(CLAUDECAGE_STATE_DIR)
+        home.join(mounts::CLAUDE_CONTAINER_STATE_DIR)
             .join(APPROVED_MOUNTS_DIR)
             .join(format!("{}.txt", self.filename()))
     }
@@ -76,7 +76,7 @@ pub fn enforce_mount_approval(
     project_host_path: &Path,
     interactive: bool,
     stdin: &mut impl BufRead,
-    stdout: &mut impl Write,
+    output: &mut impl Write,
 ) -> Result<()> {
     let snapshot = render_snapshot(mounts, project_host_path);
     let snapshot_path = validated_snapshot_path(home, profile, false)?;
@@ -86,7 +86,7 @@ pub fn enforce_mount_approval(
     }
 
     let diff = unified_diff(approved.as_deref(), &snapshot)?;
-    writeln!(stdout, "{diff}").context("failed to write mount diff")?;
+    writeln!(output, "{diff}").context("failed to write mount diff")?;
 
     if !interactive {
         bail!(
@@ -96,12 +96,12 @@ pub fn enforce_mount_approval(
     }
 
     writeln!(
-        stdout,
+        output,
         "Approve this mount set for the {} profile? [y/N]",
         profile.filename()
     )
     .context("failed to write approval prompt")?;
-    stdout.flush().context("failed to flush approval prompt")?;
+    output.flush().context("failed to flush approval prompt")?;
 
     let mut response = String::new();
     stdin
@@ -165,23 +165,10 @@ fn validated_snapshot_path(
     profile: ApprovalProfile,
     materialize_state: bool,
 ) -> Result<PathBuf> {
-    let home = home
-        .canonicalize()
-        .context("failed to resolve home directory")?;
-    let state_dir = home.join(CLAUDECAGE_STATE_DIR);
-    if state_dir.exists() {
-        let meta = state_dir
-            .symlink_metadata()
-            .with_context(|| format!("failed to inspect {}", state_dir.display()))?;
-        if meta.file_type().is_symlink() {
-            bail!("~/{CLAUDECAGE_STATE_DIR} must not be a symlink");
-        }
-    } else if materialize_state {
-        fs::create_dir(&state_dir)
-            .with_context(|| format!("failed to create {}", state_dir.display()))?;
-    }
-
-    Ok(profile.snapshot_path(&home))
+    let state_dir = mounts::claudecage_state_dir(home, materialize_state)?;
+    Ok(state_dir
+        .join(APPROVED_MOUNTS_DIR)
+        .join(format!("{}.txt", profile.filename())))
 }
 
 /// Persist a newly approved snapshot atomically.
@@ -237,15 +224,13 @@ fn unified_diff(old: Option<&str>, new: &str) -> Result<String> {
         .context("failed to flush new mount snapshot")?;
 
     let output = Command::new("diff")
-        .args([
-            OsStr::new("-u"),
-            OsStr::new("-L"),
-            OsStr::new("approved"),
-            OsStr::new("-L"),
-            OsStr::new("current"),
-            old_file.path().as_os_str(),
-            new_file.path().as_os_str(),
-        ])
+        .arg("-u")
+        .arg("-L")
+        .arg("approved")
+        .arg("-L")
+        .arg("current")
+        .arg(old_file.path())
+        .arg(new_file.path())
         .output()
         .context("failed to run diff -u")?;
 
@@ -390,6 +375,30 @@ mod tests {
     }
 
     #[test]
+    fn enforce_mount_approval_treats_eof_as_decline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let mounts = vec![mount("/tmp/state", "/tmp/state", true)];
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        let err = enforce_mount_approval(
+            &home,
+            ApprovalProfile::Claude,
+            &mounts,
+            Path::new("/Users/alice/project"),
+            true,
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mount approval declined"));
+        assert!(!ApprovalProfile::Claude.snapshot_path(&home).exists());
+    }
+
+    #[test]
     fn enforce_mount_approval_fails_noninteractive_when_snapshot_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -436,5 +445,45 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[test]
+    fn render_snapshot_keeps_readonly_mount_on_project_path() {
+        let mounts = vec![
+            mount("/Users/alice/project", "/home/alice/project", false),
+            mount("/Users/alice/project", "/home/alice/project-ro", true),
+        ];
+
+        assert_eq!(
+            render_snapshot(&mounts, Path::new("/Users/alice/project")),
+            "(ro) /Users/alice/project -> /home/alice/project-ro\n"
+        );
+    }
+
+    #[test]
+    fn enforce_mount_approval_updates_existing_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        write_snapshot(&home, ApprovalProfile::Claude, "").unwrap();
+        let mounts = vec![mount("/tmp/state", "/tmp/state", true)];
+        let mut input = Cursor::new("yes\n");
+        let mut output = Vec::new();
+
+        enforce_mount_approval(
+            &home,
+            ApprovalProfile::Claude,
+            &mounts,
+            Path::new("/Users/alice/project"),
+            true,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(ApprovalProfile::Claude.snapshot_path(&home)).unwrap(),
+            "(ro) /tmp/state -> /tmp/state\n"
+        );
     }
 }

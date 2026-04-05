@@ -105,7 +105,8 @@ Mounts are computed fresh on each invocation:
   cycles.
 
 claudecage persists the last approved non-project mount set under `~/.claudecage`. That snapshot includes the
-agent-state mounts, helper mounts, and any symlink-derived read-only mounts, but not the project directory mount. A new
+agent-state mounts, helper mounts, and any symlink-derived read-only mounts, but not the project directory mount. Codex's
+visible-path alias mount falls out of that same exclusion because it reuses the real project host path. A new
 repository path by itself therefore does not force re-approval.
 
 Host paths are remapped to Linux-conventional paths inside the container (e.g., `/Users/alice/src/foo` becomes

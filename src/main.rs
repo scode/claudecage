@@ -760,6 +760,41 @@ mod tests {
     }
 
     #[test]
+    fn prepare_launch_setup_preview_and_materialized_snapshots_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_home = tmp.path().join("real-home");
+        let aliased_root = tmp.path().join("aliased");
+        fs::create_dir_all(&real_home).unwrap();
+        fs::create_dir_all(&aliased_root).unwrap();
+        let project = real_home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let aliased_home = aliased_root.join("home-link");
+        unix_fs::symlink(&real_home, &aliased_home).unwrap();
+
+        let preview = resolve_mounts_for_workdir(
+            &aliased_home,
+            &project,
+            &[mounts::AgentStateDir::Claude],
+            false,
+            false,
+        )
+        .unwrap();
+        let materialized = resolve_mounts_for_workdir(
+            &aliased_home,
+            &project,
+            &[mounts::AgentStateDir::Claude],
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mount_approval::render_snapshot(&preview.mounts, &preview.project_root),
+            mount_approval::render_snapshot(&materialized.mounts, &materialized.project_root)
+        );
+    }
+
+    #[test]
     fn print_mounts_does_not_create_approval_snapshots() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
