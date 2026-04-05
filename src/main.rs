@@ -1,5 +1,6 @@
 mod auth;
 mod docker;
+mod mount_approval;
 mod mounts;
 
 use std::path::{Path, PathBuf};
@@ -9,8 +10,12 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::{debug, info};
 
+#[derive(Debug)]
 struct ContainerSetup {
     mounts: Vec<mounts::Mount>,
+    // The canonical project path defines which rw mounts are "the project" for
+    // approval purposes, even when Codex gets an extra visible-path alias mount.
+    project_root: PathBuf,
     container_workdir: PathBuf,
     host_workdir: PathBuf,
 }
@@ -169,10 +174,16 @@ fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
 }
 
 /// Validate the working directory and resolve mounts and both visible workdir paths.
+///
+/// `materialize_state` controls whether missing agent state should be created
+/// on disk. Launch-time mount approval uses a non-mutating preview first so the
+/// user can reject a changed mount set without claudecage having already
+/// created persistent state on the host.
 fn resolve_mounts(
     home: &Path,
     agent_state_dirs: &[mounts::AgentStateDir],
     preserve_visible_host_workdir: bool,
+    materialize_state: bool,
 ) -> Result<ContainerSetup> {
     let workdir = std::env::current_dir().context("could not determine working directory")?;
     let canonical_home = home
@@ -190,8 +201,11 @@ fn resolve_mounts(
     }
     let username = std::env::var("USER").context("USER environment variable not set")?;
     let container_home = PathBuf::from(format!("/home/{username}"));
-    let mut mounts =
-        mounts::resolve_mounts(home, &container_home, &canonical_workdir, agent_state_dirs)?;
+    let mut mounts = if materialize_state {
+        mounts::resolve_mounts(home, &container_home, &canonical_workdir, agent_state_dirs)?
+    } else {
+        mounts::preview_mounts(home, &container_home, &canonical_workdir, agent_state_dirs)?
+    };
     debug!(count = mounts.len(), "resolved mounts");
     let host_workdir = if preserve_visible_host_workdir {
         let pwd = std::env::var_os("PWD").map(PathBuf::from);
@@ -213,6 +227,7 @@ fn resolve_mounts(
         mounts::remap_path(&canonical_workdir, &canonical_home, &container_home);
     Ok(ContainerSetup {
         mounts,
+        project_root: canonical_workdir,
         container_workdir,
         host_workdir,
     })
@@ -248,16 +263,40 @@ fn codex_project_alias_mount(
     })
 }
 
-/// Resolve mounts and verify the docker image exists.
-fn resolve_container_setup(
+/// Build the candidate mount set, enforce approval, then materialize the real
+/// launch setup.
+///
+/// The preview pass is deliberately non-mutating. If the user rejects a changed
+/// mount set, claudecage should not have already created `~/.claude`, `~/.codex`,
+/// or other persistent host-side state as a side effect of asking.
+fn prepare_launch_setup(
     home: &Path,
-    agent_state_dirs: &[mounts::AgentStateDir],
-    preserve_visible_host_workdir: bool,
+    cmd: &Command,
+    stdin: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+    interactive: bool,
 ) -> Result<ContainerSetup> {
-    if !docker::image_exists()? {
-        bail!("image not found — run 'claudecage image build' first");
-    }
-    resolve_mounts(home, agent_state_dirs, preserve_visible_host_workdir)
+    let preview = resolve_mounts(
+        home,
+        mount_profile_for_command(cmd),
+        matches!(cmd, Command::Codex { .. }),
+        false,
+    )?;
+    mount_approval::enforce_mount_approval(
+        home,
+        approval_profile_for_command(cmd),
+        &preview.mounts,
+        &preview.project_root,
+        interactive,
+        stdin,
+        output,
+    )?;
+    resolve_mounts(
+        home,
+        mount_profile_for_command(cmd),
+        matches!(cmd, Command::Codex { .. }),
+        true,
+    )
 }
 
 fn run_image_action(action: ImageAction) -> Result<()> {
@@ -302,6 +341,53 @@ fn entrypoint_for_command<'a>(cmd: &'a Command) -> docker::Entrypoint<'a> {
     }
 }
 
+/// Map launch commands onto the persisted mount-approval profiles.
+///
+/// `shell` and `run` intentionally share a profile because they expose the same
+/// non-project mount set today. Keeping them together avoids asking the user to
+/// approve the same mount diff twice under two command names.
+fn approval_profile_for_command(cmd: &Command) -> mount_approval::ApprovalProfile {
+    match cmd {
+        Command::Claude { .. } => mount_approval::ApprovalProfile::Claude,
+        Command::Codex { .. } => mount_approval::ApprovalProfile::Codex,
+        Command::Shell { .. } | Command::Run { .. } => {
+            mount_approval::ApprovalProfile::ShellRun
+        }
+        Command::Mounts { .. } | Command::Image { .. } | Command::Auth { .. } => {
+            unreachable!("non-launch commands do not have mount-approval profiles")
+        }
+    }
+}
+
+fn print_mounts(home: &Path, profile: MountProfile, output: &mut impl std::io::Write) -> Result<()> {
+    let mut mounts = resolve_mounts(
+        home,
+        mount_profile_for_listing(profile),
+        matches!(profile, MountProfile::Codex),
+        true,
+    )?
+    .mounts;
+    mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
+    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    for mount in &mounts {
+        let mode = match (mount.readonly, use_color) {
+            (true, true) => "\x1b[90m(ro)\x1b[0m",
+            (true, false) => "(ro)",
+            (false, true) => "\x1b[31m(rw)\x1b[0m",
+            (false, false) => "(rw)",
+        };
+        writeln!(
+            output,
+            "{} {} -> {}",
+            mode,
+            mount.host_path.display(),
+            mount.container_path.display(),
+        )
+        .context("failed to write mount listing")?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
@@ -320,10 +406,20 @@ fn run() -> Result<ExitCode> {
         | Command::Codex { .. }
         | Command::Shell { .. }
         | Command::Run { .. }) => {
-            let setup = resolve_container_setup(
+            if !docker::image_exists()? {
+                bail!("image not found — run 'claudecage image build' first");
+            }
+            let stdin = std::io::stdin();
+            let stderr = std::io::stderr();
+            let mut stdin = stdin.lock();
+            let mut stderr = stderr.lock();
+            let setup = prepare_launch_setup(
                 &home,
-                mount_profile_for_command(cmd),
-                matches!(cmd, Command::Codex { .. }),
+                cmd,
+                &mut stdin,
+                &mut stderr,
+                std::io::IsTerminal::is_terminal(&std::io::stdin())
+                    && std::io::IsTerminal::is_terminal(&std::io::stderr()),
             )?;
             let github_token = auth::resolve_github_token()?;
             let env_vars: Vec<(&str, &str)> = github_token
@@ -354,28 +450,9 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Mounts { profile } => {
-            let mut mounts = resolve_mounts(
-                &home,
-                mount_profile_for_listing(profile),
-                matches!(profile, MountProfile::Codex),
-            )?
-            .mounts;
-            mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
-            let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-            for mount in &mounts {
-                let mode = match (mount.readonly, use_color) {
-                    (true, true) => "\x1b[90m(ro)\x1b[0m",
-                    (true, false) => "(ro)",
-                    (false, true) => "\x1b[31m(rw)\x1b[0m",
-                    (false, false) => "(rw)",
-                };
-                println!(
-                    "{} {} -> {}",
-                    mode,
-                    mount.host_path.display(),
-                    mount.container_path.display(),
-                );
-            }
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            print_mounts(&home, profile, &mut stdout)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -396,9 +473,16 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::io::Cursor;
     use std::fs;
     use std::os::unix::fs as unix_fs;
+    use std::sync::{Mutex, OnceLock};
     use tracing::level_filters::LevelFilter;
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn log_level_defaults_to_info() {
@@ -470,6 +554,7 @@ mod tests {
     fn codex_uses_host_workdir() {
         let setup = ContainerSetup {
             mounts: Vec::new(),
+            project_root: PathBuf::from("/Users/alice/git/project"),
             container_workdir: PathBuf::from("/home/alice/git/project"),
             host_workdir: PathBuf::from("/Users/alice/git/project"),
         };
@@ -487,6 +572,7 @@ mod tests {
     fn claude_uses_container_workdir() {
         let setup = ContainerSetup {
             mounts: Vec::new(),
+            project_root: PathBuf::from("/Users/alice/git/project"),
             container_workdir: PathBuf::from("/home/alice/git/project"),
             host_workdir: PathBuf::from("/Users/alice/git/project"),
         };
@@ -518,6 +604,16 @@ mod tests {
         assert_eq!(
             profile,
             [mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex]
+        );
+    }
+
+    #[test]
+    fn approval_profile_matches_command() {
+        assert_eq!(
+            approval_profile_for_command(&Command::Shell {
+                shell_args: Vec::new(),
+            }),
+            mount_approval::ApprovalProfile::ShellRun
         );
     }
 
@@ -566,5 +662,89 @@ mod tests {
         assert_eq!(mount.host_path, Path::new("/Users/alice/src/project"));
         assert_eq!(mount.container_path, Path::new("/home/alice/link/project"));
         assert!(!mount.readonly);
+    }
+
+    #[test]
+    fn prepare_launch_setup_rejects_without_creating_state() {
+        let _guard = cwd_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let prior_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&project).unwrap();
+
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let err = prepare_launch_setup(
+            &home,
+            &Command::Claude {
+                claude_args: Vec::new(),
+            },
+            &mut input,
+            &mut output,
+            false,
+        )
+        .unwrap_err();
+
+        std::env::set_current_dir(prior_cwd).unwrap();
+        assert!(err.to_string().contains("rerun interactively"));
+        assert!(!home.join(".claude").exists());
+        assert!(!home.join(".claudecage").exists());
+    }
+
+    #[test]
+    fn prepare_launch_setup_materializes_state_after_approval() {
+        let _guard = cwd_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let prior_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&project).unwrap();
+
+        let mut input = Cursor::new("yes\n");
+        let mut output = Vec::new();
+        let setup = prepare_launch_setup(
+            &home,
+            &Command::Claude {
+                claude_args: Vec::new(),
+            },
+            &mut input,
+            &mut output,
+            true,
+        )
+        .unwrap();
+
+        std::env::set_current_dir(prior_cwd).unwrap();
+        assert!(home.join(".claude").exists());
+        assert!(
+            home.join(".claudecage")
+                .join("approved-mounts")
+                .join("claude.txt")
+                .exists()
+        );
+        assert!(
+            !setup.mounts.is_empty(),
+            "approved launch should return a real container setup"
+        );
+    }
+
+    #[test]
+    fn print_mounts_does_not_create_approval_snapshots() {
+        let _guard = cwd_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let prior_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&project).unwrap();
+
+        let mut output = Vec::new();
+        print_mounts(&home, MountProfile::Shell, &mut output).unwrap();
+
+        std::env::set_current_dir(prior_cwd).unwrap();
+        assert!(!home.join(".claudecage").join("approved-mounts").exists());
+        assert!(!output.is_empty());
     }
 }

@@ -51,6 +51,10 @@ directories outside `$HOME` with a clear error.
 Each invocation is an ephemeral container that is removed when claude exits. No state persists inside the container
 between runs except through mounted volumes.
 
+Before the container launches, claudecage compares the current non-project mount set for the `claude` profile against
+the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved snapshot
+exists yet, claudecage must print a unified diff and require explicit user approval before launching.
+
 Claude's interactive TOS prompt for bypass-permissions mode is suppressed — the container sandbox makes it redundant.
 
 All arguments after `--` are forwarded to claude verbatim.
@@ -62,6 +66,10 @@ directories outside `$HOME` with a clear error.
 
 Each invocation is an ephemeral container that is removed when Codex exits. No state persists inside the container
 between runs except through mounted volumes.
+
+Before the container launches, claudecage compares the current non-project mount set for the `codex` profile against
+the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved snapshot
+exists yet, claudecage must print a unified diff and require explicit user approval before launching.
 
 Codex is launched with `--dangerously-bypass-approvals-and-sandbox`. This is intentional. The whole point of claudecage
 is that the outer Docker sandbox is the safety boundary rather than the agent's built-in permission system.
@@ -78,18 +86,29 @@ All arguments after `--` are forwarded to Codex verbatim after claudecage's requ
 Open an interactive bash shell in the container. Uses the same container setup, mounts, and security restrictions as
 `claudecage claude` and `claudecage codex`. All arguments after `--` are forwarded to bash verbatim.
 
+Before the container launches, claudecage compares the current non-project mount set for the shared `shell`/`run`
+profile against the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no
+approved snapshot exists yet, claudecage must print a unified diff and require explicit user approval before
+launching.
+
 ### `claudecage run <command...>`
 
 Run a command in the container via `bash -c`. Uses the same container setup, mounts, and security restrictions as
 `claudecage claude` and `claudecage codex`. All arguments are joined with spaces and passed as a single string to
 `bash -c`.
 
+Before the container launches, claudecage compares the current non-project mount set for the shared `shell`/`run`
+profile against the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no
+approved snapshot exists yet, claudecage must print a unified diff and require explicit user approval before
+launching.
+
 ### `claudecage mounts [profile]`
 
 Print the bind mounts that would be used for the requested command profile in the current working directory. Valid
 profiles are `claude`, `codex`, `shell`, and `run`; the default is `shell`. Each line shows the read/write mode, host
 path, and container path. Output is sorted by host path. When stdout is a terminal, the mode tag is colorized (grey for
-read-only, red for read-write). Does not require the Docker image to exist.
+read-only, red for read-write). Does not require the Docker image to exist. This command must not read, prompt about,
+or update the persisted mount-approval snapshots.
 
 ### `claudecage auth set-github-token`
 
@@ -160,6 +179,8 @@ The exact mount set depends on the subcommand. Only the following host paths are
   `claudecage shell`, and `claudecage run`. This file is claudecage's container-specific Claude runtime state. It is
   created automatically if it does not exist. On first use, if the host's `~/.claude.json` exists, claudecage seeds the
   container-specific file from it so onboarding state, theme selection, and similar runtime preferences carry over.
+  `~/.claudecage` must not be a symlink; claudecage-owned state is intentionally pinned to a real directory under
+  `$HOME`.
 
 - **`~/.codex`**: mounted read-write for `claudecage codex`, `claudecage shell`, and `claudecage run`. This is where
   Codex stores auth state, config, history, session data, plugin state, rules, skills, local caches, worktrees, and
@@ -209,13 +230,34 @@ directory's rw mount).
 
 This means a process inside the container can create symlinks in whichever agent state directories are mounted and
 writable (`~/.claude`, `~/.codex`, or both), pointing to other directories under `$HOME`. Those directories will become
-visible (read-only) on the next claudecage invocation that mounts the same agent state directory. This is an intentional
-tradeoff — those directories must be writable for the agents to function, and the `$HOME` boundary limits the exposure.
-A future improvement may make the set of allowed symlink target directories configurable.
+visible (read-only) on the next claudecage invocation that mounts the same agent state directory. claudecage does not
+silently accept that change: before launch, it compares the current non-project mount set against the last user-approved
+snapshot for the relevant profile and blocks until the user explicitly approves the new set. The `$HOME` boundary still
+limits the exposure, and a future improvement may make the set of allowed symlink target directories configurable.
 
 To prevent read-only symlink target mounts from shadowing read-write mounts, claudecage orders all read-only mounts
 before read-write mounts in the Docker invocation. Docker's bind mount semantics give the last mount precedence when
 paths overlap, so this ordering ensures read-write access is never downgraded by a symlink target mount.
+
+### Mount approval snapshots
+
+For each launch profile, claudecage persists the last approved non-project mount set under `~/.claudecage`. The
+profiles are `claude`, `codex`, and shared `shell`/`run`.
+
+`~/.claudecage` must not be a symlink. The approval baselines live there specifically so the container cannot rewrite
+them through an agent-mounted path such as `~/.claude` or `~/.codex`.
+
+The persisted snapshot covers every non-project bind mount that would be visible to the container, including agent-state
+mounts, helper mounts, and symlink-derived read-only mounts. It does not include the project directory mount, and it
+does not include Codex's visible-path alias mount when that alias refers to the same project content as the main
+project mount. Changing repositories by itself therefore does not trigger mount re-approval.
+
+When the current snapshot differs from the approved snapshot, claudecage writes both snapshots to temporary files, runs
+`diff -u`, prints the resulting unified diff, and asks the user whether to approve the new set. Approval updates the
+persisted snapshot for that profile; rejection aborts launch and leaves the previous snapshot untouched.
+
+If approval is required but stdin is not a terminal, claudecage must print the unified diff and fail rather than
+launching without confirmation.
 
 ### Privilege restrictions
 
@@ -304,12 +346,10 @@ These are areas where the current behavior is acceptable but could be improved:
 - **TTY detection.** The container allocates a TTY (`-it`) only when stdin is a terminal. When stdin is not a terminal,
   neither `-i` nor `-t` is passed, enabling scripted and non-interactive use.
 
-- **Symlink-based mount expansion.** A session can create symlinks in `~/.claude` pointing to directories under `$HOME`
-  or in `~/.codex` pointing to directories under `$HOME` (e.g., `~/.ssh`), causing those directories to become visible
-  read-only on the next run. This is an accepted consequence of those directories being writable — the agents need write
-  access there to function. The `$HOME` boundary limits the scope, but sensitive directories like `~/.ssh` or `~/.aws`
-  are within that boundary. Configurable symlink target allowlisting (see "Potential future improvements") would narrow
-  this.
+- **Symlink-based mount expansion within `$HOME`.** A session can still create symlinks in `~/.claude` or `~/.codex`
+  pointing to directories under `$HOME` (e.g., `~/.ssh`). The next matching launch will not proceed silently — it will
+  stop and require approval — but the newly requested read-only visibility is still possible if the user approves it.
+  Configurable symlink target allowlisting (see "Potential future improvements") would narrow this further.
 
 - **Persistent agent-state poisoning.** Because claudecage shares the host's `~/.claude` and `~/.codex` directories, a
   compromised session can poison future sessions by modifying persistent rules, settings, plugins, prompts, skills, or
