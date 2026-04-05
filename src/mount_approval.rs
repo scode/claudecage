@@ -97,6 +97,12 @@ pub fn enforce_mount_approval(
 
     writeln!(
         output,
+        "claudecage is asking because this launch would expose a different set of non-project host paths than the last approved run. Those paths become visible inside the container, and newly added read-only mounts can expose additional data under your home directory on future agent runs."
+    )
+    .context("failed to write approval explanation")?;
+    writeln!(output).context("failed to write approval explanation spacing")?;
+    writeln!(
+        output,
         "Approve this mount set for the {} profile? [y/N]",
         profile.filename()
     )
@@ -323,6 +329,7 @@ mod tests {
         );
         let printed = String::from_utf8(output).unwrap();
         assert!(printed.contains("--- approved"));
+        assert!(printed.contains("this launch would expose a different set of non-project host paths"));
         assert!(printed.contains("Approve this mount set"));
     }
 

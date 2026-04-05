@@ -43,8 +43,8 @@ read-write.
 
 The first launch of each mount profile also prompts for mount approval, because there is no previously approved
 baseline yet. When the non-project mount set changes later, claudecage shows a unified diff of the old and new mount
-snapshots and asks for confirmation before it starts the container. Non-interactive launches fail instead of auto-
-approving.
+snapshots, explains why that matters for container-visible host paths, and asks for confirmation before it starts the
+container. Non-interactive launches fail instead of auto-approving.
 
 Codex has a similar caveat, but with an extra wrinkle. Codex can normally cache credentials in either `~/.codex` or the
 host credential store. Inside the Linux container, the macOS keychain path is not available, so claudecage forces Codex

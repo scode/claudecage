@@ -253,8 +253,9 @@ does not include Codex's visible-path alias mount when that alias refers to the 
 project mount. Changing repositories by itself therefore does not trigger mount re-approval.
 
 When the current snapshot differs from the approved snapshot, claudecage writes both snapshots to temporary files, runs
-`diff -u`, prints the resulting unified diff, and asks the user whether to approve the new set. Approval updates the
-persisted snapshot for that profile; rejection aborts launch and leaves the previous snapshot untouched.
+`diff -u`, prints the resulting unified diff, and explains why approval is being requested and what approving it means
+for container-visible host paths. It then asks the user whether to approve the new set. Approval updates the persisted
+snapshot for that profile; rejection aborts launch and leaves the previous snapshot untouched.
 
 If approval is required but stdin is not a terminal, claudecage must print the unified diff and fail rather than
 launching without confirmation.
