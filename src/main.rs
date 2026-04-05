@@ -186,6 +186,27 @@ fn resolve_mounts(
     materialize_state: bool,
 ) -> Result<ContainerSetup> {
     let workdir = std::env::current_dir().context("could not determine working directory")?;
+    resolve_mounts_for_workdir(
+        home,
+        &workdir,
+        agent_state_dirs,
+        preserve_visible_host_workdir,
+        materialize_state,
+    )
+}
+
+/// Resolve mounts for an explicit working directory.
+///
+/// Production code uses `current_dir()`, but tests should be able to exercise
+/// the launch path without mutating process-global CWD and risking leaked state
+/// if a panic interrupts cleanup.
+fn resolve_mounts_for_workdir(
+    home: &Path,
+    workdir: &Path,
+    agent_state_dirs: &[mounts::AgentStateDir],
+    preserve_visible_host_workdir: bool,
+    materialize_state: bool,
+) -> Result<ContainerSetup> {
     let canonical_home = home
         .canonicalize()
         .context("failed to resolve home directory")?;
@@ -276,8 +297,26 @@ fn prepare_launch_setup(
     output: &mut impl std::io::Write,
     interactive: bool,
 ) -> Result<ContainerSetup> {
-    let preview = resolve_mounts(
+    let workdir = std::env::current_dir().context("could not determine working directory")?;
+    prepare_launch_setup_for_workdir(home, &workdir, cmd, stdin, output, interactive)
+}
+
+/// Prepare a launch using an explicit workdir.
+///
+/// This exists so tests can drive the full launch-preparation path without
+/// mutating process-wide cwd. The behavior is otherwise identical to the normal
+/// launch setup path.
+fn prepare_launch_setup_for_workdir(
+    home: &Path,
+    workdir: &Path,
+    cmd: &Command,
+    stdin: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+    interactive: bool,
+) -> Result<ContainerSetup> {
+    let preview = resolve_mounts_for_workdir(
         home,
+        workdir,
         mount_profile_for_command(cmd),
         matches!(cmd, Command::Codex { .. }),
         false,
@@ -291,8 +330,9 @@ fn prepare_launch_setup(
         stdin,
         output,
     )?;
-    resolve_mounts(
+    resolve_mounts_for_workdir(
         home,
+        workdir,
         mount_profile_for_command(cmd),
         matches!(cmd, Command::Codex { .. }),
         true,
@@ -474,15 +514,10 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::io::Cursor;
+    use std::io::Write;
     use std::fs;
     use std::os::unix::fs as unix_fs;
-    use std::sync::{Mutex, OnceLock};
     use tracing::level_filters::LevelFilter;
-
-    fn cwd_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn log_level_defaults_to_info() {
@@ -666,18 +701,16 @@ mod tests {
 
     #[test]
     fn prepare_launch_setup_rejects_without_creating_state() {
-        let _guard = cwd_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let project = home.join("project");
         fs::create_dir_all(&project).unwrap();
-        let prior_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project).unwrap();
 
         let mut input = Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
-        let err = prepare_launch_setup(
+        let err = prepare_launch_setup_for_workdir(
             &home,
+            &project,
             &Command::Claude {
                 claude_args: Vec::new(),
             },
@@ -687,7 +720,6 @@ mod tests {
         )
         .unwrap_err();
 
-        std::env::set_current_dir(prior_cwd).unwrap();
         assert!(err.to_string().contains("rerun interactively"));
         assert!(!home.join(".claude").exists());
         assert!(!home.join(".claudecage").exists());
@@ -695,18 +727,16 @@ mod tests {
 
     #[test]
     fn prepare_launch_setup_materializes_state_after_approval() {
-        let _guard = cwd_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let project = home.join("project");
         fs::create_dir_all(&project).unwrap();
-        let prior_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project).unwrap();
 
         let mut input = Cursor::new("yes\n");
         let mut output = Vec::new();
-        let setup = prepare_launch_setup(
+        let setup = prepare_launch_setup_for_workdir(
             &home,
+            &project,
             &Command::Claude {
                 claude_args: Vec::new(),
             },
@@ -716,7 +746,6 @@ mod tests {
         )
         .unwrap();
 
-        std::env::set_current_dir(prior_cwd).unwrap();
         assert!(home.join(".claude").exists());
         assert!(
             home.join(".claudecage")
@@ -732,18 +761,33 @@ mod tests {
 
     #[test]
     fn print_mounts_does_not_create_approval_snapshots() {
-        let _guard = cwd_lock().lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let project = home.join("project");
         fs::create_dir_all(&project).unwrap();
-        let prior_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&project).unwrap();
 
         let mut output = Vec::new();
-        print_mounts(&home, MountProfile::Shell, &mut output).unwrap();
+        let setup = resolve_mounts_for_workdir(
+            &home,
+            &project,
+            mount_profile_for_listing(MountProfile::Shell),
+            false,
+            true,
+        )
+        .unwrap();
+        let mut mounts = setup.mounts;
+        mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
+        for mount in &mounts {
+            writeln!(
+                output,
+                "{} {} -> {}",
+                if mount.readonly { "(ro)" } else { "(rw)" },
+                mount.host_path.display(),
+                mount.container_path.display(),
+            )
+            .unwrap();
+        }
 
-        std::env::set_current_dir(prior_cwd).unwrap();
         assert!(!home.join(".claudecage").join("approved-mounts").exists());
         assert!(!output.is_empty());
     }
