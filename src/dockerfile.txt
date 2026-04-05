@@ -31,10 +31,11 @@ RUN groupadd -g ${GID} ${USERNAME} 2>/dev/null; \
 # Install Homebrew as non-root user (needs sudo for /home/linuxbrew ownership)
 USER ${USERNAME}
 RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
+ENV PATH="/home/${USERNAME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
     LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install dprint gh sapling scode/dist-tap/leiter rust
+RUN brew install dprint gh sapling scode/dist-tap/leiter rust uv
+RUN uv tool install ghstack
 
 # Remove temporary sudo grant, configure system-level git settings, and
 # create a symlink from the host home path to the container home path.
