@@ -154,9 +154,12 @@ The exact mount set depends on the subcommand. Only the following host paths are
   (rather than the macOS Keychain). This file is created on the host when the user authenticates inside the container
   via `/login`, and contains a bearer token that should be treated like a password.
 
-- **`~/.claude.json`**: mounted read-write for `claudecage claude`, `claudecage shell`, and `claudecage run`. Claude
-  stores configuration in this file alongside the `~/.claude` directory. Created automatically (as `{}`) if it does not
-  exist.
+- **`~/.claudecage/claude.json`**: mounted read-write at container path `~/.claude.json` for `claudecage claude`,
+  `claudecage shell`, and `claudecage run`. This file is claudecage's container-specific Claude runtime state. It is
+  created automatically if it does not exist. On first use, if the host's `~/.claude.json` exists, claudecage seeds the
+  container-specific file from it so onboarding state, theme selection, and similar runtime preferences carry over.
+  After that initial seeding, host Claude and container Claude no longer share `~/.claude.json`, which avoids
+  cross-environment clobbering of that file.
 
 - **`~/.codex`**: mounted read-write for `claudecage codex`, `claudecage shell`, and `claudecage run`. This is where
   Codex stores auth state, config, history, session data, plugin state, rules, skills, local caches, worktrees, and
@@ -267,10 +270,10 @@ container.
 ### Container lifecycle
 
 Each `claudecage` invocation creates a fresh container that is removed on exit. Nothing persists inside the container
-between runs except through the mounted host directories for that command profile (`~/.claude`, `~/.claude.json`,
-`~/.codex`, the project directory, and any optional mounts as applicable). This means any tools installed, files
-created, or state accumulated inside the container during a session are lost when it ends unless they land on one of
-those mounted paths.
+between runs except through the mounted host paths for that command profile (`~/.claude`, `~/.claudecage/claude.json`
+mounted as `~/.claude.json`, `~/.codex`, the project directory, and any optional mounts as applicable). This means any
+tools installed, files created, or state accumulated inside the container during a session are lost when it ends unless
+they land on one of those mounted paths.
 
 ### Mount path remapping
 
@@ -302,7 +305,7 @@ These are areas where the current behavior is acceptable but could be improved:
   neither `-i` nor `-t` is passed, enabling scripted and non-interactive use.
 
 - **Symlink-based mount expansion.** A session can create symlinks in `~/.claude` pointing to directories under `$HOME`
-  or `~/.codex` pointing to directories under `$HOME` (e.g., `~/.ssh`), causing those directories to become visible
+  or in `~/.codex` pointing to directories under `$HOME` (e.g., `~/.ssh`), causing those directories to become visible
   read-only on the next run. This is an accepted consequence of those directories being writable — the agents need write
   access there to function. The `$HOME` boundary limits the scope, but sensitive directories like `~/.ssh` or `~/.aws`
   are within that boundary. Configurable symlink target allowlisting (see "Potential future improvements") would narrow
