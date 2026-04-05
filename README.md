@@ -41,10 +41,10 @@ across runs via the `~/.claude` mount. Note that this creates `~/.claude/.creden
 bearer token and should be treated like a password. This is an inherent consequence of `~/.claude` being mounted
 read-write.
 
-The first launch of each mount profile also prompts for mount approval, because there is no previously approved
-baseline yet. When the non-project mount set changes later, claudecage shows a unified diff of the old and new mount
-snapshots, explains why that matters for container-visible host paths, and asks for confirmation before it starts the
-container. Non-interactive launches fail instead of auto-approving.
+The first launch of each mount profile also prompts for mount approval, because there is no previously approved baseline
+yet. When the non-project mount set changes later, claudecage shows a unified diff of the old and new mount snapshots,
+explains why that matters for container-visible host paths, and asks for confirmation before it starts the container.
+Non-interactive launches fail instead of auto-approving.
 
 Codex has a similar caveat, but with an extra wrinkle. Codex can normally cache credentials in either `~/.codex` or the
 host credential store. Inside the Linux container, the macOS keychain path is not available, so claudecage forces Codex
@@ -105,8 +105,8 @@ Mounts are computed fresh on each invocation:
   cycles.
 
 claudecage persists the last approved non-project mount set under `~/.claudecage`. That snapshot includes the
-agent-state mounts, helper mounts, and any symlink-derived read-only mounts, but not the project directory mount. Codex's
-visible-path alias mount falls out of that same exclusion because it reuses the real project host path. A new
+agent-state mounts, helper mounts, and any symlink-derived read-only mounts, but not the project directory mount.
+Codex's visible-path alias mount falls out of that same exclusion because it reuses the real project host path. A new
 repository path by itself therefore does not force re-approval.
 
 Host paths are remapped to Linux-conventional paths inside the container (e.g., `/Users/alice/src/foo` becomes
@@ -131,9 +131,9 @@ damage:
 - **Bind mount syntax**: uses `--mount type=bind,...` instead of `-v` to avoid ambiguity with colons in paths.
 
 Symlink targets from the mounted agent state directories are validated to be under `$HOME`. Because those directories
-are writable, a process inside the container could create symlinks pointing to other directories under `$HOME`. The
-next matching launch will stop, show a unified diff of the changed mount set, and require approval before exposing the
-new read-only mount. See [docs/security.md](docs/security.md) for the full threat model and known risk vectors.
+are writable, a process inside the container could create symlinks pointing to other directories under `$HOME`. The next
+matching launch will stop, show a unified diff of the changed mount set, and require approval before exposing the new
+read-only mount. See [docs/security.md](docs/security.md) for the full threat model and known risk vectors.
 
 ## Limitations
 

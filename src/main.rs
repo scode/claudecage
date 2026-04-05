@@ -390,16 +390,18 @@ fn approval_profile_for_command(cmd: &Command) -> mount_approval::ApprovalProfil
     match cmd {
         Command::Claude { .. } => mount_approval::ApprovalProfile::Claude,
         Command::Codex { .. } => mount_approval::ApprovalProfile::Codex,
-        Command::Shell { .. } | Command::Run { .. } => {
-            mount_approval::ApprovalProfile::ShellRun
-        }
+        Command::Shell { .. } | Command::Run { .. } => mount_approval::ApprovalProfile::ShellRun,
         Command::Mounts { .. } | Command::Image { .. } | Command::Auth { .. } => {
             unreachable!("non-launch commands do not have mount-approval profiles")
         }
     }
 }
 
-fn print_mounts(home: &Path, profile: MountProfile, output: &mut impl std::io::Write) -> Result<()> {
+fn print_mounts(
+    home: &Path,
+    profile: MountProfile,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
     let mut mounts = resolve_mounts(
         home,
         mount_profile_for_listing(profile),
@@ -513,9 +515,9 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::fs;
     use std::io::Cursor;
     use std::io::Write;
-    use std::fs;
     use std::os::unix::fs as unix_fs;
     use tracing::level_filters::LevelFilter;
 
@@ -747,12 +749,11 @@ mod tests {
         .unwrap();
 
         assert!(home.join(".claude").exists());
-        assert!(
-            home.join(".claudecage")
-                .join("approved-mounts")
-                .join("claude.txt")
-                .exists()
-        );
+        assert!(home
+            .join(".claudecage")
+            .join("approved-mounts")
+            .join("claude.txt")
+            .exists());
         assert!(
             !setup.mounts.is_empty(),
             "approved launch should return a real container setup"

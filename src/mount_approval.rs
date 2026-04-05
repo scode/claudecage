@@ -132,7 +132,7 @@ pub fn enforce_mount_approval(
 pub fn render_snapshot(mounts: &[Mount], project_host_path: &Path) -> String {
     let mut lines: Vec<String> = mounts
         .iter()
-        .filter(|mount| !(mount.host_path == project_host_path && !mount.readonly))
+        .filter(|mount| mount.host_path != project_host_path || mount.readonly)
         .map(|mount| {
             let mode = if mount.readonly { "(ro)" } else { "(rw)" };
             format!(
@@ -188,8 +188,7 @@ fn write_snapshot(home: &Path, profile: ApprovalProfile, snapshot: &str) -> Resu
     let parent = path
         .parent()
         .context("approved mount snapshot path must have a parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
 
     let mut temp = NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
@@ -246,8 +245,7 @@ fn unified_diff(old: Option<&str>, new: &str) -> Result<String> {
         Some(0) => Ok(String::new()),
         Some(1) => String::from_utf8(output.stdout).context("diff output was not valid UTF-8"),
         _ => {
-            let stderr =
-                String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             bail!("diff -u failed: {stderr}");
         }
     }
@@ -329,7 +327,9 @@ mod tests {
         );
         let printed = String::from_utf8(output).unwrap();
         assert!(printed.contains("--- approved"));
-        assert!(printed.contains("this launch would expose a different set of non-project host paths"));
+        assert!(
+            printed.contains("this launch would expose a different set of non-project host paths")
+        );
         assert!(printed.contains("Approve this mount set"));
     }
 
@@ -338,7 +338,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir(&home).unwrap();
-        write_snapshot(&home, ApprovalProfile::Codex, "(rw) /tmp/state -> /tmp/state\n").unwrap();
+        write_snapshot(
+            &home,
+            ApprovalProfile::Codex,
+            "(rw) /tmp/state -> /tmp/state\n",
+        )
+        .unwrap();
         let mounts = vec![mount("/tmp/state", "/tmp/state", false)];
         let mut input = Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();

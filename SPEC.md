@@ -52,8 +52,8 @@ Each invocation is an ephemeral container that is removed when claude exits. No 
 between runs except through mounted volumes.
 
 Before the container launches, claudecage compares the current non-project mount set for the `claude` profile against
-the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved snapshot
-exists yet, claudecage must print a unified diff and require explicit user approval before launching.
+the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved snapshot exists
+yet, claudecage must print a unified diff and require explicit user approval before launching.
 
 Claude's interactive TOS prompt for bypass-permissions mode is suppressed — the container sandbox makes it redundant.
 
@@ -67,9 +67,9 @@ directories outside `$HOME` with a clear error.
 Each invocation is an ephemeral container that is removed when Codex exits. No state persists inside the container
 between runs except through mounted volumes.
 
-Before the container launches, claudecage compares the current non-project mount set for the `codex` profile against
-the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved snapshot
-exists yet, claudecage must print a unified diff and require explicit user approval before launching.
+Before the container launches, claudecage compares the current non-project mount set for the `codex` profile against the
+last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved snapshot exists
+yet, claudecage must print a unified diff and require explicit user approval before launching.
 
 Codex is launched with `--dangerously-bypass-approvals-and-sandbox`. This is intentional. The whole point of claudecage
 is that the outer Docker sandbox is the safety boundary rather than the agent's built-in permission system.
@@ -87,9 +87,8 @@ Open an interactive bash shell in the container. Uses the same container setup, 
 `claudecage claude` and `claudecage codex`. All arguments after `--` are forwarded to bash verbatim.
 
 Before the container launches, claudecage compares the current non-project mount set for the shared `shell`/`run`
-profile against the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no
-approved snapshot exists yet, claudecage must print a unified diff and require explicit user approval before
-launching.
+profile against the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved
+snapshot exists yet, claudecage must print a unified diff and require explicit user approval before launching.
 
 ### `claudecage run <command...>`
 
@@ -98,17 +97,16 @@ Run a command in the container via `bash -c`. Uses the same container setup, mou
 `bash -c`.
 
 Before the container launches, claudecage compares the current non-project mount set for the shared `shell`/`run`
-profile against the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no
-approved snapshot exists yet, claudecage must print a unified diff and require explicit user approval before
-launching.
+profile against the last user-approved snapshot stored under `~/.claudecage`. If the snapshot differs, or if no approved
+snapshot exists yet, claudecage must print a unified diff and require explicit user approval before launching.
 
 ### `claudecage mounts [profile]`
 
 Print the bind mounts that would be used for the requested command profile in the current working directory. Valid
 profiles are `claude`, `codex`, `shell`, and `run`; the default is `shell`. Each line shows the read/write mode, host
 path, and container path. Output is sorted by host path. When stdout is a terminal, the mode tag is colorized (grey for
-read-only, red for read-write). Does not require the Docker image to exist. This command must not read, prompt about,
-or update the persisted mount-approval snapshots.
+read-only, red for read-write). Does not require the Docker image to exist. This command must not read, prompt about, or
+update the persisted mount-approval snapshots.
 
 ### `claudecage auth set-github-token`
 
@@ -241,16 +239,16 @@ paths overlap, so this ordering ensures read-write access is never downgraded by
 
 ### Mount approval snapshots
 
-For each launch profile, claudecage persists the last approved non-project mount set under `~/.claudecage`. The
-profiles are `claude`, `codex`, and shared `shell`/`run`.
+For each launch profile, claudecage persists the last approved non-project mount set under `~/.claudecage`. The profiles
+are `claude`, `codex`, and shared `shell`/`run`.
 
 `~/.claudecage` must not be a symlink. The approval baselines live there specifically so the container cannot rewrite
 them through an agent-mounted path such as `~/.claude` or `~/.codex`.
 
 The persisted snapshot covers every non-project bind mount that would be visible to the container, including agent-state
 mounts, helper mounts, and symlink-derived read-only mounts. It does not include the project directory mount, and it
-does not include Codex's visible-path alias mount when that alias refers to the same project content as the main
-project mount. Changing repositories by itself therefore does not trigger mount re-approval.
+does not include Codex's visible-path alias mount when that alias refers to the same project content as the main project
+mount. Changing repositories by itself therefore does not trigger mount re-approval.
 
 When the current snapshot differs from the approved snapshot, claudecage writes both snapshots to temporary files, runs
 `diff -u`, prints the resulting unified diff, and explains why approval is being requested and what approving it means
