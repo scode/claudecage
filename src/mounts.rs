@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use tracing::debug;
 
+const CLAUDE_CONTAINER_STATE_DIR: &str = ".claudecage";
+const CLAUDE_CONTAINER_STATE_FILE: &str = "claude.json";
+
 /// A bind mount for `docker run`.
 #[derive(Debug)]
 pub struct Mount {
@@ -101,14 +104,13 @@ pub fn resolve_mounts(
     }
 
     if agent_state_dirs.contains(&AgentStateDir::Claude) {
-        // ~/.claude.json — read-write. Claude stores configuration here
-        // (outside ~/.claude). Create it if absent so the mount succeeds.
-        let claude_json = home.join(".claude.json");
-        if !claude_json.exists() {
-            std::fs::write(&claude_json, "{}").context("failed to create ~/.claude.json")?;
-        }
+        // Claude stores runtime state in ~/.claude.json, but sharing that file
+        // with the host has proven fragile. Mount a container-specific file at
+        // the same path instead so host and container Claude runs stop
+        // clobbering each other's state.
+        let claude_json = ensure_claude_container_state_file(&home)?;
         mounts.push(Mount {
-            container_path: remap_path(&claude_json, &home, container_home),
+            container_path: container_home.join(".claude.json"),
             host_path: claude_json,
             readonly: false,
         });
@@ -181,6 +183,67 @@ pub fn resolve_mounts(
     mounts.sort_by_key(|m| !m.readonly);
 
     Ok(mounts)
+}
+
+/// Ensure the persistent Claude runtime-state file used by claudecage exists.
+///
+/// The file lives under `~/.claudecage/claude.json` on the host and is mounted
+/// into the container as `~/.claude.json`. When creating it for the first time,
+/// seed from the host's `~/.claude.json` if that exists so the container keeps
+/// the user's existing theme, onboarding state, and similar UI/runtime data.
+fn ensure_claude_container_state_file(home: &Path) -> Result<PathBuf> {
+    let state_dir = home.join(CLAUDE_CONTAINER_STATE_DIR);
+    if !state_dir.exists() {
+        std::fs::create_dir(&state_dir)
+            .with_context(|| format!("failed to create ~/{CLAUDE_CONTAINER_STATE_DIR}"))?;
+    }
+
+    let state_dir = state_dir
+        .canonicalize()
+        .with_context(|| format!("failed to resolve ~/{CLAUDE_CONTAINER_STATE_DIR}"))?;
+    if !state_dir.starts_with(home) {
+        bail!(
+            "~/{CLAUDE_CONTAINER_STATE_DIR} resolves to {} which is outside the home directory",
+            state_dir.display()
+        );
+    }
+
+    let state_file = state_dir.join(CLAUDE_CONTAINER_STATE_FILE);
+    if !state_file.exists() {
+        let host_state = home.join(".claude.json");
+        if host_state.exists() {
+            std::fs::copy(&host_state, &state_file).with_context(|| {
+                format!(
+                    "failed to seed {}/{} from ~/.claude.json",
+                    CLAUDE_CONTAINER_STATE_DIR, CLAUDE_CONTAINER_STATE_FILE
+                )
+            })?;
+        } else {
+            std::fs::write(&state_file, "{}").with_context(|| {
+                format!(
+                    "failed to create {}/{}",
+                    CLAUDE_CONTAINER_STATE_DIR, CLAUDE_CONTAINER_STATE_FILE
+                )
+            })?;
+        }
+    }
+
+    let state_file = state_file.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve {}/{}",
+            CLAUDE_CONTAINER_STATE_DIR, CLAUDE_CONTAINER_STATE_FILE
+        )
+    })?;
+    if !state_file.starts_with(&state_dir) {
+        bail!(
+            "{}/{} resolves to {} which is outside the state directory",
+            CLAUDE_CONTAINER_STATE_DIR,
+            CLAUDE_CONTAINER_STATE_FILE,
+            state_file.display()
+        );
+    }
+
+    Ok(state_file)
 }
 
 /// Recursively walk an agent state directory and resolve symlinks. File
@@ -310,6 +373,7 @@ mod tests {
         let home = tmp.path().join("home");
         fs::create_dir(&home).unwrap();
         fs::create_dir(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude.json"), r#"{"theme":"dark"}"#).unwrap();
         let project = home.join("project");
         fs::create_dir(&project).unwrap();
 
@@ -355,13 +419,19 @@ mod tests {
             .unwrap();
         assert_eq!(
             claude_json_mount.host_path,
-            home_canonical.join(".claude.json")
+            home_canonical
+                .join(CLAUDE_CONTAINER_STATE_DIR)
+                .join(CLAUDE_CONTAINER_STATE_FILE)
         );
         assert!(!claude_json_mount.readonly);
+        assert_eq!(
+            fs::read_to_string(&claude_json_mount.host_path).unwrap(),
+            r#"{"theme":"dark"}"#
+        );
     }
 
     #[test]
-    fn resolve_mounts_creates_claude_dir_if_missing() {
+    fn resolve_mounts_creates_claude_and_container_state_if_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         fs::create_dir(&home).unwrap();
@@ -380,8 +450,56 @@ mod tests {
 
         assert!(home.join(".claude").exists());
         assert!(home.join(".codex").exists());
-        assert!(home.join(".claude.json").exists());
+        assert!(home.join(".claudecage").exists());
+        assert!(home.join(".claudecage").join("claude.json").exists());
+        assert!(!home.join(".claude.json").exists());
         assert_eq!(mounts.len(), 4);
+    }
+
+    #[test]
+    fn resolve_mounts_seeds_container_state_from_host_claude_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude.json"),
+            r#"{"hasCompletedOnboarding":true}"#,
+        )
+        .unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.join(".claudecage").join("claude.json")).unwrap(),
+            r#"{"hasCompletedOnboarding":true}"#
+        );
+    }
+
+    #[test]
+    fn resolve_mounts_preserves_existing_container_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        fs::create_dir(home.join(".claudecage")).unwrap();
+        fs::write(
+            home.join(".claudecage").join("claude.json"),
+            r#"{"source":"container"}"#,
+        )
+        .unwrap();
+        fs::write(home.join(".claude.json"), r#"{"source":"host"}"#).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.join(".claudecage").join("claude.json")).unwrap(),
+            r#"{"source":"container"}"#
+        );
     }
 
     #[test]
@@ -577,6 +695,27 @@ mod tests {
         unix_fs::symlink(&outside, home.join(".codex")).unwrap();
 
         let err = resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Codex])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the home directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_mounts_rejects_claudecage_dir_symlink_outside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        unix_fs::symlink(&outside, home.join(".claudecage")).unwrap();
+
+        let err = resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude])
             .unwrap_err();
         assert!(
             err.to_string().contains("outside the home directory"),
