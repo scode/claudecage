@@ -8,20 +8,26 @@ This is not an architecture document or implementation guide. It says nothing ab
 
 ## Purpose
 
-claudecage runs Claude Code with `--dangerously-skip-permissions` inside a Docker container so that the agent has full
-autonomy within a sandbox that limits its ability to affect the host environment. The primary threat is the agent
-accidentally (or through prompt injection) running destructive commands or exfiltrating credentials from the host
-filesystem. This is not a hardened adversarial containment system — it's a practical safety net for everyday use.
+claudecage runs coding agents with their least-safe local mode enabled inside a Docker container so that the "dangerous"
+part is constrained to a smaller sandbox. Today that means:
+
+- Claude Code with `--dangerously-skip-permissions`
+- Codex CLI with `--dangerously-bypass-approvals-and-sandbox`
+
+The primary threat is the agent accidentally (or through prompt injection) running destructive commands or exfiltrating
+credentials from the host filesystem. This is not a hardened adversarial containment system — it's a practical safety
+net for everyday use.
 
 ## Threat model
 
 The goal is to protect the local environment from being side-effected by the agent. Specifically:
 
 - The agent must not be able to modify, create, or delete files on the host filesystem outside of the project directory
-  and `~/.claude`.
-- The agent must not be able to read host files outside the project directory, `~/.claude`, and the symlink targets
-  described below. However, because `~/.claude` is writable, the agent can create symlinks there that expand read-only
-  visibility to other directories under `$HOME` on the next run (see "Symlink target restrictions" below).
+  and the writable agent state directories described below.
+- The agent must not be able to read host files outside the project directory, the writable agent state directories, and
+  the symlink targets described below. However, because those agent state directories are writable, the agent can create
+  symlinks there that expand read-only visibility to other directories under `$HOME` on the next run (see "Symlink
+  target restrictions" below).
 - The agent must not be able to escalate privileges inside the container.
 
 The following are explicitly _not_ primary defense goals:
@@ -49,15 +55,34 @@ Claude's interactive TOS prompt for bypass-permissions mode is suppressed — th
 
 All arguments after `--` are forwarded to claude verbatim.
 
+### `claudecage codex [-- codex-args...]`
+
+Run Codex in the current working directory. The working directory must be under `$HOME` — claudecage must reject
+directories outside `$HOME` with a clear error.
+
+Each invocation is an ephemeral container that is removed when Codex exits. No state persists inside the container
+between runs except through mounted volumes.
+
+Codex is launched with `--dangerously-bypass-approvals-and-sandbox`. This is intentional. The whole point of claudecage
+is that the outer Docker sandbox is the safety boundary rather than the agent's built-in permission system.
+
+For Codex specifically, claudecage must set the container working directory to the host-style project path (e.g.
+`/Users/alice/src/myproject`) rather than the remapped Linux path. The image already provides a symlink from that host
+home path to `/home/<username>`, so the path resolves inside the container while still matching Codex configuration
+keyed by host paths.
+
+All arguments after `--` are forwarded to Codex verbatim after claudecage's required leading arguments.
+
 ### `claudecage shell [-- shell-args...]`
 
 Open an interactive bash shell in the container. Uses the same container setup, mounts, and security restrictions as
-`claudecage claude`. All arguments after `--` are forwarded to bash verbatim.
+`claudecage claude` and `claudecage codex`. All arguments after `--` are forwarded to bash verbatim.
 
 ### `claudecage run <command...>`
 
 Run a command in the container via `bash -c`. Uses the same container setup, mounts, and security restrictions as
-`claudecage claude`. All arguments are joined with spaces and passed as a single string to `bash -c`.
+`claudecage claude` and `claudecage codex`. All arguments are joined with spaces and passed as a single string to
+`bash -c`.
 
 ### `claudecage mounts`
 
@@ -83,8 +108,8 @@ Remove the stored GitHub token from the Keychain. Exits successfully whether or 
 
 Build the Docker image if it does not already exist.
 
-The image must include a non-root user matching the host user's uid and gid so that claude does not run as root inside
-the container.
+The image must include a non-root user matching the host user's uid and gid so that the agent does not run as root
+inside the container.
 
 The image includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, `rust`, and `uv` via Homebrew in stable cached
 layers. It also installs `ghstack` via `uv tool install`, with the uv tool bin directory on `PATH` so `ghstack` is
@@ -92,19 +117,20 @@ available in normal sessions. `gh` is configured as the git credential helper so
 operations use `GH_TOKEN` when it is set. `leiter` is a personal preference — a future improvement should make the set
 of baked-in tools configurable.
 
-Claude Code and `stax` are installed in refreshable tail layers so they can be updated without discarding the rest of
-the Docker cache.
+Claude Code, Codex CLI, and `stax` are installed in refreshable tail layers so they can be updated without discarding
+the rest of the Docker cache.
 
 ### `claudecage image refresh`
 
-Rebuild the Docker image while preserving cached base layers but forcing Claude Code and `stax` to reinstall.
+Rebuild the Docker image while preserving cached base layers but forcing Claude Code, Codex CLI, and `stax` to
+reinstall.
 
 If the image does not exist yet, `image refresh` builds it.
 
 ### `claudecage image rebuild`
 
 Rebuild the Docker image from scratch, bypassing all Docker layer caches. Use this to pick up new versions of
-claude-code, `stax`, or any other image dependency, or to recover from a broken image.
+claude-code, Codex CLI, `stax`, or any other image dependency, or to recover from a broken image.
 
 ### Verbosity
 
@@ -130,6 +156,22 @@ Only the following host paths are visible inside the container:
 - **`~/.claude.json`**: mounted read-write. Claude stores configuration in this file alongside the `~/.claude`
   directory. Created automatically (as `{}`) if it does not exist.
 
+- **`~/.codex`**: mounted read-write. This is where Codex stores auth state, config, history, session data, plugin
+  state, rules, skills, local caches, worktrees, and other persistent runtime state. Created automatically if it does
+  not exist. If `~/.codex` is itself a symlink, its resolved path must be under `$HOME` — claudecage must reject it
+  otherwise.
+
+  Codex can store cached credentials either in `~/.codex/auth.json` or in an OS credential store. Inside claudecage,
+  Codex must be forced to use file-backed credentials so that authentication persists through the mounted `~/.codex`
+  directory rather than depending on macOS keychain APIs that do not exist in the Linux container. This means signing in
+  to Codex inside the container creates or updates `~/.codex/auth.json` on the host, and that file should be treated
+  like a password.
+
+  This is a deliberate security tradeoff, not an incidental detail. On the host, Codex may otherwise be able to keep
+  cached credentials in the macOS keychain. Inside claudecage, that storage mechanism is unavailable, so persistent
+  in-container Codex login necessarily falls back to a host file. That is weaker at rest than keychain-backed storage,
+  but it is the behavior required for Codex to work in the same persistent-state model as Claude.
+
 - **`~/.leiter`** (if it exists): mounted read-write. Leiter stores its soul and session logs here. Only mounted when
   the directory already exists on the host — it is not created automatically. If `~/.leiter` is a symlink, its resolved
   path must be under `$HOME` or it is silently skipped.
@@ -138,15 +180,17 @@ Only the following host paths are visible inside the container:
   configuration inside the container. If `~/.gitconfig` is a symlink, its resolved path must be under `$HOME` or it is
   silently skipped.
 
-- **Symlink targets from `~/.claude`**: symlinks anywhere within `~/.claude` are recursively resolved and their targets
-  mounted read-only. This allows configurations like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json` and
-  individual skill symlinks like `~/.claude/skills/foo -> ~/git/foo` to work transparently inside the container. Only
-  symlinks are resolved — the recursive traversal descends into real (non-symlink) subdirectories but does not follow
-  symlinks to directories, preventing cycles and keeping traversal within `~/.claude`. Broken symlinks are silently
-  skipped. When a symlink target overlaps with a read-write mount (the project directory, `~/.claude`, or `~/.leiter`),
-  the read-write mount takes precedence. If the target equals or is inside an rw mount, the ro mount is omitted (it
-  would be redundant). If the target is an ancestor of an rw mount, both are mounted but ro mounts are ordered before rw
-  mounts so that Docker's last-mount-wins gives the rw mount precedence over the overlapping portion.
+- **Symlink targets from `~/.claude` and `~/.codex`**: symlinks anywhere within either writable agent state directory
+  are recursively resolved and their targets mounted read-only. This allows configurations like
+  `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json`, `~/.claude/skills/foo -> ~/git/foo`,
+  `~/.codex/skills/bar -> ~/git/bar`, or `~/.codex/AGENTS.md -> ~/dotfiles/codex/AGENTS.md` to work transparently inside
+  the container. Only symlinks are resolved — the recursive traversal descends into real (non-symlink) subdirectories
+  but does not follow symlinks to directories, preventing cycles and keeping traversal within the agent state root being
+  scanned. Broken symlinks are silently skipped. When a symlink target overlaps with a read-write mount (the project
+  directory, `~/.claude`, `~/.codex`, or `~/.leiter`), the read-write mount takes precedence. If the target equals or is
+  inside an rw mount, the ro mount is omitted (it would be redundant). If the target is an ancestor of an rw mount, both
+  are mounted but ro mounts are ordered before rw mounts so that Docker's last-mount-wins gives the rw mount precedence
+  over the overlapping portion.
 
 Nothing else from the host is visible. In particular, `~/.ssh`, `~/.aws`, `~/.config`, browser profiles, and other
 credential stores are not accessible.
@@ -154,12 +198,14 @@ credential stores are not accessible.
 ### Symlink target restrictions
 
 All resolved symlink targets must be under `$HOME`. Targets that resolve outside `$HOME` are silently skipped. Targets
-that resolve back inside `~/.claude` are also skipped (they're already accessible via the `~/.claude` mount).
+that resolve back inside the agent state directory being scanned are also skipped (they're already accessible via that
+directory's rw mount).
 
-This means a process inside the container can create symlinks in `~/.claude` (which is writable) pointing to other
-directories under `$HOME`, and those directories will become visible (read-only) on the next claudecage invocation. This
-is an intentional tradeoff — `~/.claude` must be writable for claude to function, and the `$HOME` boundary limits the
-exposure. A future improvement may make the set of allowed symlink target directories configurable.
+This means a process inside the container can create symlinks in `~/.claude` or `~/.codex` (both writable) pointing to
+other directories under `$HOME`, and those directories will become visible (read-only) on the next claudecage
+invocation. This is an intentional tradeoff — those directories must be writable for the agents to function, and the
+`$HOME` boundary limits the exposure. A future improvement may make the set of allowed symlink target directories
+configurable.
 
 To prevent read-only symlink target mounts from shadowing read-write mounts, claudecage orders all read-only mounts
 before read-write mounts in the Docker invocation. Docker's bind mount semantics give the last mount precedence when
@@ -176,7 +222,8 @@ The container must be run with:
 
 ### Network
 
-The container has unrestricted outbound network access. Claude needs this for API calls and authentication.
+The container has unrestricted outbound network access. Claude and Codex both need this for API calls and
+authentication.
 
 NOTE: this is a known gap. The container can reach `localhost`, which may bypass host-side firewalls or access services
 the user runs locally with the assumption that only trusted local processes will connect. A future improvement should
@@ -207,7 +254,8 @@ Security properties of the token injection:
   process argv. During container launch, it is passed to the docker process via an anonymous pipe and file descriptor
   inheritance. No temporary files are created in either case.
 - Inside the container, the token is available as the `GH_TOKEN` environment variable. This is an accepted trade-off —
-  the sandbox model already trusts the agent with read-write access to the project directory and `~/.claude`.
+  the sandbox model already trusts the agent with read-write access to the project directory, `~/.claude`, and
+  `~/.codex`.
 
 The recommended token configuration is a fine-grained PAT scoped to specific repositories with only "Contents: Read and
 write" and "Pull requests: Read and write" permissions. This limits the blast radius if the token is exposed inside the
@@ -216,20 +264,26 @@ container.
 ### Container lifecycle
 
 Each `claudecage` invocation creates a fresh container that is removed on exit. Nothing persists inside the container
-between runs except through the mounted `~/.claude` directory. This means any tools installed, files created, or state
-accumulated inside the container during a session are lost when it ends.
+between runs except through the mounted host directories (`~/.claude`, `~/.claude.json`, `~/.codex`, the project
+directory, and any optional mounts). This means any tools installed, files created, or state accumulated inside the
+container during a session are lost when it ends unless they land on one of those mounted paths.
 
 ### Mount path remapping
 
 Host paths under `$HOME` are remapped to Linux-conventional paths inside the container. The container user's home
 directory is `/home/<username>`, so a host path like `/Users/alice/src/myproject` becomes `/home/alice/src/myproject`
-inside the container. This means paths in claude's output use Linux-style paths that differ from the host — a tradeoff
-for having a standard Linux filesystem layout inside the container.
+inside the container. This means paths in agent output often use Linux-style paths that differ from the host — a
+tradeoff for having a standard Linux filesystem layout inside the container.
 
-To support tools that persist absolute host paths in config files (e.g., Claude Code plugin metadata), the image
-includes a symlink from the host home path to the container home path when they differ (e.g., `/Users/alice` ->
-`/home/alice`). This allows those hardcoded paths to resolve inside the container without rewriting config files at
-startup.
+To support tools that persist absolute host paths in config files (e.g., Claude Code plugin metadata or Codex project
+trust entries), the image includes a symlink from the host home path to the container home path when they differ (e.g.,
+`/Users/alice` -> `/home/alice`). This allows those hardcoded paths to resolve inside the container without rewriting
+config files at startup.
+
+Codex has an extra caveat here. Its `~/.codex/config.toml` can contain project-specific configuration keyed by absolute
+host paths such as `[projects."/Users/alice/src/myproject"]`, including project trust metadata. To keep those settings
+working, `claudecage codex` uses the host-style project path as the container working directory even though the bind
+mount itself still targets the remapped Linux path under `/home/<username>`.
 
 ## Known gaps
 
@@ -242,17 +296,23 @@ These are areas where the current behavior is acceptable but could be improved:
   neither `-i` nor `-t` is passed, enabling scripted and non-interactive use.
 
 - **Symlink-based mount expansion.** A session can create symlinks in `~/.claude` pointing to directories under `$HOME`
-  (e.g., `~/.ssh`), causing those directories to become visible read-only on the next run. This is an accepted
-  consequence of `~/.claude` being writable — claude needs write access there to function. The `$HOME` boundary limits
-  the scope, but sensitive directories like `~/.ssh` or `~/.aws` are within that boundary. Configurable symlink target
-  allowlisting (see "Potential future improvements") would narrow this.
+  or `~/.codex` pointing to directories under `$HOME` (e.g., `~/.ssh`), causing those directories to become visible
+  read-only on the next run. This is an accepted consequence of those directories being writable — the agents need write
+  access there to function. The `$HOME` boundary limits the scope, but sensitive directories like `~/.ssh` or `~/.aws`
+  are within that boundary. Configurable symlink target allowlisting (see "Potential future improvements") would narrow
+  this.
+
+- **Persistent agent-state poisoning.** Because claudecage shares the host's `~/.claude` and `~/.codex` directories, a
+  compromised session can poison future sessions by modifying persistent rules, settings, plugins, prompts, skills, or
+  other agent state. This is not limited to future claudecage runs — it can also affect direct host usage of those
+  tools.
 
 ## Potential future improvements
 
 These are not gaps — the current behavior is intentionally designed this way — but they may be worth revisiting:
 
 - **Configurable symlink targets.** An allowlist of permitted symlink target directories (rather than accepting anything
-  under `$HOME`) would reduce the mount expansion risk from writable `~/.claude`.
+  under `$HOME`) would reduce the mount expansion risk from writable `~/.claude` and `~/.codex`.
 
 - **Configurable Homebrew packages.** The image currently hardcodes `leiter` from `scode/dist-tap`. A configuration file
   or CLI flag to specify additional Homebrew taps and packages to install would make the image useful to others.
