@@ -12,6 +12,12 @@ pub struct Mount {
     pub readonly: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentStateDir {
+    Claude,
+    Codex,
+}
+
 /// Remap a host path under `host_home` to the equivalent path under
 /// `container_home`. Paths not under `host_home` are returned unchanged.
 pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathBuf {
@@ -23,12 +29,12 @@ pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathB
 
 /// Compute all mounts needed for a claudecage invocation.
 ///
-/// The project directory is mounted read-write so claude can modify code.
-/// `~/.claude` is created if absent and
-/// mounted read-write so auth, sessions, and settings persist across
-/// ephemeral container runs. Symlinks anywhere within `~/.claude` are
-/// recursively resolved and their targets mounted read-only so those
-/// symlinks work inside the container.
+/// The project directory is mounted read-write so the agent can modify code.
+/// The requested agent state directories are created if absent and mounted
+/// read-write so auth, sessions, and settings persist across ephemeral
+/// container runs. Symlinks anywhere within those directories are recursively
+/// resolved and their targets mounted read-only so those symlinks work inside
+/// the container.
 ///
 /// Host paths under `home` are remapped to `container_home` inside the
 /// container so that macOS-style paths like `/Users/alice` become
@@ -39,59 +45,74 @@ pub fn remap_path(path: &Path, host_home: &Path, container_home: &Path) -> PathB
 /// mounts are ordered with read-only mounts first so that Docker's
 /// last-mount-wins gives read-write mounts precedence when paths overlap.
 ///
-/// Bails if `~/.claude` resolves to a path outside `$HOME`.
-pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Result<Vec<Mount>> {
+/// Bails if a requested agent state directory resolves to a path outside
+/// `$HOME`.
+pub fn resolve_mounts(
+    home: &Path,
+    container_home: &Path,
+    project: &Path,
+    agent_state_dirs: &[AgentStateDir],
+) -> Result<Vec<Mount>> {
     let home = home
         .canonicalize()
         .context("failed to resolve home directory")?;
     let project = project
         .canonicalize()
         .context("failed to resolve project directory")?;
-    let claude_dir = home.join(".claude");
-
     let mut mounts = Vec::new();
+    let mut targets = Vec::new();
 
-    // Project directory — read-write so claude can modify code.
+    // Project directory — read-write so the agent can modify code.
     mounts.push(Mount {
         container_path: remap_path(&project, &home, container_home),
         host_path: project,
         readonly: false,
     });
 
-    // Ensure ~/.claude exists so auth and session state can be persisted.
-    if !claude_dir.exists() {
-        std::fs::create_dir(&claude_dir).context("failed to create ~/.claude")?;
+    for (dirname, kind) in [
+        (".claude", AgentStateDir::Claude),
+        (".codex", AgentStateDir::Codex),
+    ] {
+        if !agent_state_dirs.contains(&kind) {
+            continue;
+        }
+
+        let dir = home.join(dirname);
+        if !dir.exists() {
+            std::fs::create_dir(&dir).with_context(|| format!("failed to create ~/{dirname}"))?;
+        }
+
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("failed to resolve ~/{dirname}"))?;
+        if !dir.starts_with(&home) {
+            bail!(
+                "~/{dirname} resolves to {} which is outside the home directory",
+                dir.display()
+            );
+        }
+
+        mounts.push(Mount {
+            container_path: container_home.join(dirname),
+            host_path: dir.clone(),
+            readonly: false,
+        });
+        targets.extend(collect_symlink_targets(&dir, &home)?);
     }
 
-    // ~/.claude — read-write. Validate that the resolved path is still
-    // under $HOME (could be a symlink to somewhere else). Same variable
-    // used for the check and the mount to prevent drift.
-    let claude_dir = claude_dir
-        .canonicalize()
-        .context("failed to resolve ~/.claude")?;
-    if !claude_dir.starts_with(&home) {
-        bail!(
-            "~/.claude resolves to {} which is outside the home directory",
-            claude_dir.display()
-        );
+    if agent_state_dirs.contains(&AgentStateDir::Claude) {
+        // ~/.claude.json — read-write. Claude stores configuration here
+        // (outside ~/.claude). Create it if absent so the mount succeeds.
+        let claude_json = home.join(".claude.json");
+        if !claude_json.exists() {
+            std::fs::write(&claude_json, "{}").context("failed to create ~/.claude.json")?;
+        }
+        mounts.push(Mount {
+            container_path: remap_path(&claude_json, &home, container_home),
+            host_path: claude_json,
+            readonly: false,
+        });
     }
-    mounts.push(Mount {
-        container_path: remap_path(&claude_dir, &home, container_home),
-        host_path: claude_dir.clone(),
-        readonly: false,
-    });
-
-    // ~/.claude.json — read-write. Claude stores configuration here
-    // (outside ~/.claude). Create it if absent so the mount succeeds.
-    let claude_json = home.join(".claude.json");
-    if !claude_json.exists() {
-        std::fs::write(&claude_json, "{}").context("failed to create ~/.claude.json")?;
-    }
-    mounts.push(Mount {
-        container_path: remap_path(&claude_json, &home, container_home),
-        host_path: claude_json,
-        readonly: false,
-    });
 
     // ~/.leiter — read-write if it exists. Leiter stores its soul and
     // session logs here.
@@ -129,9 +150,8 @@ pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Res
         }
     }
 
-    // Resolve symlinks to find directories outside ~/.claude that need
-    // mounting for the symlinks to work inside the container.
-    let targets = collect_symlink_targets(&claude_dir, &home)?;
+    // Resolve symlinks to find directories outside the writable agent state
+    // mounts that need mounting for the symlinks to work inside the container.
     let deduped = deduplicate_ancestors(targets);
 
     // Symlink targets that equal or fall inside an existing rw mount are
@@ -163,13 +183,14 @@ pub fn resolve_mounts(home: &Path, container_home: &Path, project: &Path) -> Res
     Ok(mounts)
 }
 
-/// Recursively walk a directory and resolve symlinks. File symlinks resolve
-/// to their parent directory; directory symlinks resolve to the directory
-/// itself. Non-symlink subdirectories are descended into so that nested
-/// symlinks (e.g. individual skill symlinks inside `~/.claude/skills/`) are
-/// discovered. Broken symlinks and targets outside `home` are skipped with a
-/// debug log — the latter prevents a compromised container from crafting
-/// symlinks that expose arbitrary host paths on the next run.
+/// Recursively walk an agent state directory and resolve symlinks. File
+/// symlinks resolve to their parent directory; directory symlinks resolve to
+/// the directory itself. Non-symlink subdirectories are descended into so that
+/// nested symlinks (e.g. individual skill symlinks inside `~/.claude/skills/`
+/// or `~/.codex/skills/`) are discovered. Broken symlinks and targets outside
+/// `home` are skipped with a debug log — the latter prevents a compromised
+/// container from crafting symlinks that expose arbitrary host paths on the
+/// next run.
 fn collect_symlink_targets(dir: &Path, home: &Path) -> Result<Vec<PathBuf>> {
     let root = dir;
     let mut targets = Vec::new();
@@ -199,7 +220,11 @@ fn collect_symlink_targets(dir: &Path, home: &Path) -> Result<Vec<PathBuf>> {
                 };
 
                 if target_dir.starts_with(root) {
-                    debug!(?target_dir, "skipping symlink target inside ~/.claude");
+                    debug!(
+                        ?target_dir,
+                        ?root,
+                        "skipping symlink target inside agent state root"
+                    );
                     continue;
                 }
                 if !target_dir.starts_with(home) {
@@ -289,26 +314,50 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
         let home_canonical = home.canonicalize().unwrap();
         let project_canonical = project.canonicalize().unwrap();
 
-        assert_eq!(mounts.len(), 3);
-        // Project: host path unchanged, container path remapped.
-        assert_eq!(mounts[0].host_path, project_canonical);
+        assert_eq!(mounts.len(), 4);
+        let project_mount = mounts
+            .iter()
+            .find(|m| m.host_path == project_canonical)
+            .unwrap();
         assert_eq!(
-            mounts[0].container_path,
+            project_mount.container_path,
             remap_path(&project_canonical, &home_canonical, &ch),
         );
-        assert!(!mounts[0].readonly);
-        // .claude
-        assert_eq!(mounts[1].host_path, home_canonical.join(".claude"));
-        assert_eq!(mounts[1].container_path, ch.join(".claude"));
-        assert!(!mounts[1].readonly);
-        // .claude.json
-        assert_eq!(mounts[2].host_path, home_canonical.join(".claude.json"));
-        assert_eq!(mounts[2].container_path, ch.join(".claude.json"));
-        assert!(!mounts[2].readonly);
+        assert!(!project_mount.readonly);
+
+        let claude_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".claude"))
+            .unwrap();
+        assert_eq!(claude_mount.host_path, home_canonical.join(".claude"));
+        assert!(!claude_mount.readonly);
+
+        let codex_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".codex"))
+            .unwrap();
+        assert_eq!(codex_mount.host_path, home_canonical.join(".codex"));
+        assert!(!codex_mount.readonly);
+
+        let claude_json_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".claude.json"))
+            .unwrap();
+        assert_eq!(
+            claude_json_mount.host_path,
+            home_canonical.join(".claude.json")
+        );
+        assert!(!claude_json_mount.readonly);
     }
 
     #[test]
@@ -320,11 +369,19 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         assert!(!home.join(".claude").exists());
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        assert!(!home.join(".codex").exists());
+        let mounts = resolve_mounts(
+            &home,
+            &container_home(),
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
 
         assert!(home.join(".claude").exists());
+        assert!(home.join(".codex").exists());
         assert!(home.join(".claude.json").exists());
-        assert_eq!(mounts.len(), 3);
+        assert_eq!(mounts.len(), 4);
     }
 
     #[test]
@@ -348,7 +405,7 @@ mod tests {
         .unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(&home, &ch, &project, &[AgentStateDir::Claude]).unwrap();
 
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
@@ -380,7 +437,7 @@ mod tests {
         unix_fs::symlink(&external, claude_dir.join("skills")).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(&home, &ch, &project, &[AgentStateDir::Claude]).unwrap();
 
         assert_eq!(mounts.len(), 4);
         let external_canonical = external.canonicalize().unwrap();
@@ -389,6 +446,39 @@ mod tests {
             .iter()
             .find(|m| m.host_path == external_canonical)
             .expect("expected mount for external symlink target");
+        assert_eq!(
+            ext_mount.container_path,
+            remap_path(&external_canonical, &home_canonical, &ch),
+        );
+        assert!(ext_mount.readonly);
+    }
+
+    #[test]
+    fn resolve_mounts_follows_codex_directory_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let codex_dir = home.join(".codex");
+        fs::create_dir(&codex_dir).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let external = home.join("skills-repo");
+        fs::create_dir(&external).unwrap();
+
+        unix_fs::symlink(&external, codex_dir.join("skills")).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project, &[AgentStateDir::Codex]).unwrap();
+
+        assert_eq!(mounts.len(), 3);
+        let external_canonical = external.canonicalize().unwrap();
+        let home_canonical = home.canonicalize().unwrap();
+        let ext_mount = mounts
+            .iter()
+            .find(|m| m.host_path == external_canonical)
+            .expect("expected mount for external codex symlink target");
         assert_eq!(
             ext_mount.container_path,
             remap_path(&external_canonical, &home_canonical, &ch),
@@ -408,7 +498,8 @@ mod tests {
 
         unix_fs::symlink("/nonexistent/path", claude_dir.join("broken")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
         assert_eq!(mounts.len(), 3);
     }
 
@@ -424,7 +515,8 @@ mod tests {
 
         unix_fs::symlink(claude_dir.join("subdir"), claude_dir.join("link")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
         assert_eq!(mounts.len(), 3);
     }
 
@@ -444,7 +536,8 @@ mod tests {
 
         unix_fs::symlink(outside.join("secrets"), claude_dir.join("secrets")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
         assert_eq!(mounts.len(), 3);
     }
 
@@ -461,11 +554,56 @@ mod tests {
 
         unix_fs::symlink(&outside, home.join(".claude")).unwrap();
 
-        let err = resolve_mounts(&home, &container_home(), &project).unwrap_err();
+        let err = resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude])
+            .unwrap_err();
         assert!(
             err.to_string().contains("outside the home directory"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn resolve_mounts_rejects_codex_dir_symlink_outside_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+
+        unix_fs::symlink(&outside, home.join(".codex")).unwrap();
+
+        let err = resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Codex])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the home directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_mounts_keeps_codex_mountpoint_when_host_dir_is_symlinked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let codex_target = home.join("dotfiles").join("codex");
+        fs::create_dir_all(&codex_target).unwrap();
+        unix_fs::symlink(&codex_target, home.join(".codex")).unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let ch = container_home();
+        let mounts = resolve_mounts(&home, &ch, &project, &[AgentStateDir::Codex]).unwrap();
+        let codex_mount = mounts
+            .iter()
+            .find(|m| m.container_path == ch.join(".codex"))
+            .expect("expected ~/.codex mount at fixed container path");
+
+        assert_eq!(codex_mount.host_path, codex_target.canonicalize().unwrap());
+        assert!(!codex_mount.readonly);
     }
 
     #[test]
@@ -479,7 +617,13 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
         let home_canonical = home.canonicalize().unwrap();
 
         let leiter_mount = mounts
@@ -505,7 +649,13 @@ mod tests {
         unix_fs::symlink(&outside, home.join(".leiter")).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
 
         let leiter_mount = mounts
             .iter()
@@ -526,7 +676,13 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
 
         let leiter_mount = mounts
             .iter()
@@ -545,7 +701,13 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
         let home_canonical = home.canonicalize().unwrap();
 
         let gitconfig_mount = mounts
@@ -567,7 +729,13 @@ mod tests {
         fs::create_dir(&project).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
 
         let gitconfig_mount = mounts
             .iter()
@@ -589,7 +757,13 @@ mod tests {
         unix_fs::symlink(&outside, home.join(".gitconfig")).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(
+            &home,
+            &ch,
+            &project,
+            &[AgentStateDir::Claude, AgentStateDir::Codex],
+        )
+        .unwrap();
 
         let gitconfig_mount = mounts
             .iter()
@@ -653,7 +827,7 @@ mod tests {
         unix_fs::symlink(&graphite_repo, skills_dir.join("graphite")).unwrap();
 
         let ch = container_home();
-        let mounts = resolve_mounts(&home, &ch, &project).unwrap();
+        let mounts = resolve_mounts(&home, &ch, &project, &[AgentStateDir::Claude]).unwrap();
         let home_canonical = home.canonicalize().unwrap();
 
         let voice_canonical = voice_repo.canonicalize().unwrap();
@@ -705,7 +879,8 @@ mod tests {
         // this symlink but NOT descend into external/ to find deep-link.
         unix_fs::symlink(&external, claude_dir.join("ext")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
 
         let external_canonical = external.canonicalize().unwrap();
         let nested_canonical = nested.canonicalize().unwrap();
@@ -735,7 +910,8 @@ mod tests {
 
         unix_fs::symlink(&project, claude_dir.join("skills")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
 
         let project_canonical = project.canonicalize().unwrap();
         let project_mounts: Vec<_> = mounts
@@ -766,7 +942,8 @@ mod tests {
 
         unix_fs::symlink(&subdir, claude_dir.join("skills")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
 
         let subdir_canonical = subdir.canonicalize().unwrap();
         let subdir_mounts: Vec<_> = mounts
@@ -796,7 +973,8 @@ mod tests {
 
         unix_fs::symlink(&parent, claude_dir.join("skills")).unwrap();
 
-        let mounts = resolve_mounts(&home, &container_home(), &project).unwrap();
+        let mounts =
+            resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude]).unwrap();
 
         let parent_canonical = parent.canonicalize().unwrap();
         let project_canonical = project.canonicalize().unwrap();
