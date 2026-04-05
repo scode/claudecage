@@ -84,11 +84,12 @@ Run a command in the container via `bash -c`. Uses the same container setup, mou
 `claudecage claude` and `claudecage codex`. All arguments are joined with spaces and passed as a single string to
 `bash -c`.
 
-### `claudecage mounts`
+### `claudecage mounts [profile]`
 
-Print the bind mounts that would be used for a container invocation in the current working directory. Each line shows
-the read/write mode, host path, and container path. Output is sorted by host path. When stdout is a terminal, the mode
-tag is colorized (grey for read-only, red for read-write). Does not require the Docker image to exist.
+Print the bind mounts that would be used for the requested command profile in the current working directory. Valid
+profiles are `claude`, `codex`, `shell`, and `run`; the default is `shell`. Each line shows the read/write mode, host
+path, and container path. Output is sorted by host path. When stdout is a terminal, the mode tag is colorized (grey for
+read-only, red for read-write). Does not require the Docker image to exist.
 
 ### `claudecage auth set-github-token`
 
@@ -141,25 +142,26 @@ claude-code, Codex CLI, `stax`, or any other image dependency, or to recover fro
 
 ### Filesystem visibility
 
-Only the following host paths are visible inside the container:
+The exact mount set depends on the subcommand. Only the following host paths are ever visible inside the container:
 
 - **Project directory** (the working directory at invocation time): mounted read-write. The agent can read and modify
   the project's code on the host.
 
-- **`~/.claude`**: mounted read-write. This is where auth tokens, session state, conversation history, and settings
-  live. Created automatically if it does not exist. If `~/.claude` is itself a symlink, its resolved path must be under
-  `$HOME` — claudecage must reject it otherwise. Because the container runs Linux, Claude Code stores its OAuth
-  credential in `~/.claude/.credentials.json` (rather than the macOS Keychain). This file is created on the host when
-  the user authenticates inside the container via `/login`, and contains a bearer token that should be treated like a
-  password.
+- **`~/.claude`**: mounted read-write for `claudecage claude`, `claudecage shell`, and `claudecage run`. This is where
+  Claude auth tokens, session state, conversation history, and settings live. Created automatically if it does not
+  exist. If `~/.claude` is itself a symlink, its resolved path must be under `$HOME` — claudecage must reject it
+  otherwise. Because the container runs Linux, Claude Code stores its OAuth credential in `~/.claude/.credentials.json`
+  (rather than the macOS Keychain). This file is created on the host when the user authenticates inside the container
+  via `/login`, and contains a bearer token that should be treated like a password.
 
-- **`~/.claude.json`**: mounted read-write. Claude stores configuration in this file alongside the `~/.claude`
-  directory. Created automatically (as `{}`) if it does not exist.
+- **`~/.claude.json`**: mounted read-write for `claudecage claude`, `claudecage shell`, and `claudecage run`. Claude
+  stores configuration in this file alongside the `~/.claude` directory. Created automatically (as `{}`) if it does not
+  exist.
 
-- **`~/.codex`**: mounted read-write. This is where Codex stores auth state, config, history, session data, plugin
-  state, rules, skills, local caches, worktrees, and other persistent runtime state. Created automatically if it does
-  not exist. If `~/.codex` is itself a symlink, its resolved path must be under `$HOME` — claudecage must reject it
-  otherwise.
+- **`~/.codex`**: mounted read-write for `claudecage codex`, `claudecage shell`, and `claudecage run`. This is where
+  Codex stores auth state, config, history, session data, plugin state, rules, skills, local caches, worktrees, and
+  other persistent runtime state. Created automatically if it does not exist. If `~/.codex` is itself a symlink, its
+  resolved path must be under `$HOME` — claudecage must reject it otherwise.
 
   Codex can store cached credentials either in `~/.codex/auth.json` or in an OS credential store. Inside claudecage,
   Codex must be forced to use file-backed credentials so that authentication persists through the mounted `~/.codex`
@@ -180,17 +182,18 @@ Only the following host paths are visible inside the container:
   configuration inside the container. If `~/.gitconfig` is a symlink, its resolved path must be under `$HOME` or it is
   silently skipped.
 
-- **Symlink targets from `~/.claude` and `~/.codex`**: symlinks anywhere within either writable agent state directory
-  are recursively resolved and their targets mounted read-only. This allows configurations like
-  `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json`, `~/.claude/skills/foo -> ~/git/foo`,
-  `~/.codex/skills/bar -> ~/git/bar`, or `~/.codex/AGENTS.md -> ~/dotfiles/codex/AGENTS.md` to work transparently inside
-  the container. Only symlinks are resolved — the recursive traversal descends into real (non-symlink) subdirectories
-  but does not follow symlinks to directories, preventing cycles and keeping traversal within the agent state root being
-  scanned. Broken symlinks are silently skipped. When a symlink target overlaps with a read-write mount (the project
-  directory, `~/.claude`, `~/.codex`, or `~/.leiter`), the read-write mount takes precedence. If the target equals or is
-  inside an rw mount, the ro mount is omitted (it would be redundant). If the target is an ancestor of an rw mount, both
-  are mounted but ro mounts are ordered before rw mounts so that Docker's last-mount-wins gives the rw mount precedence
-  over the overlapping portion.
+- **Symlink targets from the mounted agent state directories**: symlinks anywhere within whichever writable agent state
+  directories are active for the current command are recursively resolved and their targets mounted read-only. This
+  allows configurations like `~/.claude/settings.json -> ~/dotfiles/.claude/settings.json`,
+  `~/.claude/skills/foo -> ~/git/foo`, `~/.codex/skills/bar -> ~/git/bar`, or
+  `~/.codex/AGENTS.md -> ~/dotfiles/codex/AGENTS.md` to work transparently inside the container. Only symlinks are
+  resolved — the recursive traversal descends into real (non-symlink) subdirectories but does not follow symlinks to
+  directories, preventing cycles and keeping traversal within the agent state root being scanned. Broken symlinks are
+  silently skipped. When a symlink target overlaps with a read-write mount (the project directory, `~/.claude`,
+  `~/.codex`, or `~/.leiter`), the read-write mount takes precedence. If the target equals or is inside an rw mount, the
+  ro mount is omitted (it would be redundant). If the target is an ancestor of an rw mount, both are mounted but ro
+  mounts are ordered before rw mounts so that Docker's last-mount-wins gives the rw mount precedence over the
+  overlapping portion.
 
 Nothing else from the host is visible. In particular, `~/.ssh`, `~/.aws`, `~/.config`, browser profiles, and other
 credential stores are not accessible.
@@ -201,11 +204,11 @@ All resolved symlink targets must be under `$HOME`. Targets that resolve outside
 that resolve back inside the agent state directory being scanned are also skipped (they're already accessible via that
 directory's rw mount).
 
-This means a process inside the container can create symlinks in `~/.claude` or `~/.codex` (both writable) pointing to
-other directories under `$HOME`, and those directories will become visible (read-only) on the next claudecage
-invocation. This is an intentional tradeoff — those directories must be writable for the agents to function, and the
-`$HOME` boundary limits the exposure. A future improvement may make the set of allowed symlink target directories
-configurable.
+This means a process inside the container can create symlinks in whichever agent state directories are mounted and
+writable (`~/.claude`, `~/.codex`, or both), pointing to other directories under `$HOME`. Those directories will become
+visible (read-only) on the next claudecage invocation that mounts the same agent state directory. This is an intentional
+tradeoff — those directories must be writable for the agents to function, and the `$HOME` boundary limits the exposure.
+A future improvement may make the set of allowed symlink target directories configurable.
 
 To prevent read-only symlink target mounts from shadowing read-write mounts, claudecage orders all read-only mounts
 before read-write mounts in the Docker invocation. Docker's bind mount semantics give the last mount precedence when
@@ -254,8 +257,8 @@ Security properties of the token injection:
   process argv. During container launch, it is passed to the docker process via an anonymous pipe and file descriptor
   inheritance. No temporary files are created in either case.
 - Inside the container, the token is available as the `GH_TOKEN` environment variable. This is an accepted trade-off —
-  the sandbox model already trusts the agent with read-write access to the project directory, `~/.claude`, and
-  `~/.codex`.
+  the sandbox model already trusts the agent with read-write access to the project directory and whichever agent state
+  directories are mounted for that command.
 
 The recommended token configuration is a fine-grained PAT scoped to specific repositories with only "Contents: Read and
 write" and "Pull requests: Read and write" permissions. This limits the blast radius if the token is exposed inside the
@@ -264,9 +267,10 @@ container.
 ### Container lifecycle
 
 Each `claudecage` invocation creates a fresh container that is removed on exit. Nothing persists inside the container
-between runs except through the mounted host directories (`~/.claude`, `~/.claude.json`, `~/.codex`, the project
-directory, and any optional mounts). This means any tools installed, files created, or state accumulated inside the
-container during a session are lost when it ends unless they land on one of those mounted paths.
+between runs except through the mounted host directories for that command profile (`~/.claude`, `~/.claude.json`,
+`~/.codex`, the project directory, and any optional mounts as applicable). This means any tools installed, files
+created, or state accumulated inside the container during a session are lost when it ends unless they land on one of
+those mounted paths.
 
 ### Mount path remapping
 
@@ -282,8 +286,10 @@ config files at startup.
 
 Codex has an extra caveat here. Its `~/.codex/config.toml` can contain project-specific configuration keyed by absolute
 host paths such as `[projects."/Users/alice/src/myproject"]`, including project trust metadata. To keep those settings
-working, `claudecage codex` uses the host-style project path as the container working directory even though the bind
-mount itself still targets the remapped Linux path under `/home/<username>`.
+working, `claudecage codex` uses the host-style project path as the container working directory even though the main bind
+mount still targets the remapped Linux path under `/home/<username>`. If the visible host path differs from the
+canonical project path because the user entered through a symlink under `$HOME`, claudecage also adds a second bind
+mount for the project at the visible path so that Codex can resolve it inside the container.
 
 ## Known gaps
 
