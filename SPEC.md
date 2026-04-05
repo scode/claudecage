@@ -112,11 +112,12 @@ Build the Docker image if it does not already exist.
 The image must include a non-root user matching the host user's uid and gid so that the agent does not run as root
 inside the container.
 
-The image includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, `rust`, and `uv` via Homebrew in stable cached
-layers. It also installs `ghstack` via `uv tool install`, with the uv tool bin directory on `PATH` so `ghstack` is
-available in normal sessions. `gh` is configured as the git credential helper so that `git push` and other git
-operations use `GH_TOKEN` when it is set. `leiter` is a personal preference — a future improvement should make the set
-of baked-in tools configurable.
+The image includes the system `bubblewrap` package so Codex and other agents can use a normal `bwrap` binary instead of
+falling back to vendored copies. It includes Homebrew (Linuxbrew) and installs `gh`, `leiter`, `rust`, and `uv` via
+Homebrew in stable cached layers. It also installs `ghstack` via `uv tool install`, with the uv tool bin directory on
+`PATH` so `ghstack` is available in normal sessions. `gh` is configured as the git credential helper so that `git
+push` and other git operations use `GH_TOKEN` when it is set. `leiter` is a personal preference — a future improvement
+should make the set of baked-in tools configurable.
 
 Claude Code, Codex CLI, and `stax` are installed in refreshable tail layers so they can be updated without discarding
 the rest of the Docker cache.
