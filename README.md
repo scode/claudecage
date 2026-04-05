@@ -83,9 +83,12 @@ Mounts are computed fresh on each invocation:
 
 - **Project directory** (the current working directory) — mounted read-write. The agent can read and modify your code.
   Only directories under `$HOME` are allowed.
-- **`~/.claude` and `~/.claude.json`** — mounted read-write for `claude`, `shell`, and `run`. Claude auth tokens,
-  session state, history, and settings persist across ephemeral container runs. Created automatically if they don't
+- **`~/.claude`** — mounted read-write for `claude`, `shell`, and `run`. Claude auth tokens, history, skills, plugins,
+  and other state under that directory persist across ephemeral container runs. Created automatically if it does not
   exist. If `~/.claude` is a symlink, its resolved path must be under `$HOME`.
+- **`~/.claudecage/claude.json`** — mounted read-write at container path `~/.claude.json` for `claude`, `shell`, and
+  `run`. This is Claude's container-only runtime state file. It is created automatically if it does not exist. On first
+  use, claudecage seeds it from the host's `~/.claude.json` when that file exists.
 - **`~/.codex`** — mounted read-write for `codex`, `shell`, and `run`. Codex auth state, settings, history, rules,
   plugins, skills, worktrees, and caches persist across ephemeral container runs. Created automatically if it doesn't
   exist. If `~/.codex` is a symlink, its resolved path must be under `$HOME`.
@@ -126,6 +129,8 @@ known risk vectors.
 - **TTYs are conditional.** `claudecage` allocates `-it` only when stdin is a terminal. Interactive sessions work
   normally; piped and scripted invocations are supported as long as the underlying tool supports that mode.
 - **Working directory must be under `$HOME`.** Projects outside the home directory cannot be used.
+- **Separate Claude runtime state.** Host Claude uses `~/.claude.json`. Container Claude uses a persistent file at
+  `~/.claudecage/claude.json`, mounted as `~/.claude.json` inside the container.
 - **Ephemeral containers.** Tools baked into the image (Homebrew, leiter) persist, but anything installed during a
   session is lost when it exits.
 
