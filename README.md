@@ -46,10 +46,13 @@ The token is stored in the macOS Keychain and injected into every container sess
 (`ghp_`) also work, but fine-grained tokens are recommended because they limit access to specific repos. See SPEC.md for
 the full security model around token handling.
 
+The image also includes `ghstack`, but it is not auto-configured today. `ghstack` upstream expects a `~/.ghstackrc` with
+your GitHub username and token, so runtime `GH_TOKEN` injection by itself is not enough yet.
+
 ## Image management
 
-- `claudecage image build` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew + gh) with a
-  non-root user matching the host user's uid/gid. Only needs to be run once.
+- `claudecage image build` — builds a Docker image (Ubuntu 24.04 + Node 22 + claude-code + Homebrew + `gh` + `uv` +
+  `ghstack`) with a non-root user matching the host user's uid/gid. Only needs to be run once.
 - `claudecage image refresh` — rebuilds just the refreshable tail of the image so cached base layers are reused while
   Claude Code and stax are reinstalled at their current upstream versions. Also works when the image does not exist yet.
 - `claudecage image rebuild` — rebuilds the image from scratch with no Docker cache. Use after upgrading claudecage,
