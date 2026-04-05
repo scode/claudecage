@@ -183,6 +183,35 @@ fn image_refresh_builds_missing_image() {
     );
 }
 
+/// Verify that the baked image exposes the expected CLI tools on PATH.
+#[test]
+fn image_includes_uv_and_ghstack() {
+    if !common::capability_enabled("docker_build") {
+        return;
+    }
+    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
+
+    ensure_image();
+
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "claudecage:latest",
+            "bash",
+            "-lc",
+            "command -v uv && command -v ghstack",
+        ])
+        .output()
+        .expect("failed to run tool presence check inside image");
+
+    assert!(
+        output.status.success(),
+        "expected uv and ghstack on PATH, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Verify that `docker image inspect` succeeds on an image known to exist.
 ///
 /// Uses `hello-world` which is tiny and widely available. Pulls it first to
