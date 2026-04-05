@@ -9,9 +9,26 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::{debug, info};
 
+struct ContainerSetup {
+    mounts: Vec<mounts::Mount>,
+    container_workdir: PathBuf,
+    host_workdir: PathBuf,
+}
+
+fn mount_profile_for_command(cmd: &Command) -> &'static [mounts::AgentStateDir] {
+    match cmd {
+        Command::Claude { .. } => &[mounts::AgentStateDir::Claude],
+        Command::Codex { .. } => &[mounts::AgentStateDir::Codex],
+        Command::Shell { .. } | Command::Run { .. } => {
+            &[mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex]
+        }
+        _ => &[],
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "claudecage")]
-/// Run Claude Code with full permissions inside a sandboxed Docker container.
+/// Run coding agents with full permissions inside a sandboxed Docker container.
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -32,6 +49,12 @@ enum Command {
         /// Arguments forwarded to claude (after --).
         #[arg(last = true)]
         claude_args: Vec<String>,
+    },
+    /// Run codex in the current working directory.
+    Codex {
+        /// Arguments forwarded to codex (after --).
+        #[arg(last = true)]
+        codex_args: Vec<String>,
     },
     /// Open an interactive shell in the container.
     Shell {
@@ -62,7 +85,7 @@ enum Command {
 enum ImageAction {
     /// Build the Docker image.
     Build,
-    /// Refresh Claude Code and stax while preserving cached base layers.
+    /// Refresh Claude Code, Codex CLI, and stax while preserving cached base layers.
     Refresh,
     /// Rebuild the image from scratch (no cache).
     Rebuild,
@@ -122,8 +145,11 @@ fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
     LEVELS[idx as usize]
 }
 
-/// Validate the working directory and resolve mounts and the container working directory.
-fn resolve_mounts(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
+/// Validate the working directory and resolve mounts and both visible workdir paths.
+fn resolve_mounts(
+    home: &Path,
+    agent_state_dirs: &[mounts::AgentStateDir],
+) -> Result<ContainerSetup> {
     let workdir = std::env::current_dir().context("could not determine working directory")?;
     if !workdir.starts_with(home) {
         bail!(
@@ -134,26 +160,34 @@ fn resolve_mounts(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
     }
     let username = std::env::var("USER").context("USER environment variable not set")?;
     let container_home = PathBuf::from(format!("/home/{username}"));
-    let mounts = mounts::resolve_mounts(home, &container_home, &workdir)?;
+    let mounts = mounts::resolve_mounts(home, &container_home, &workdir, agent_state_dirs)?;
     debug!(count = mounts.len(), "resolved mounts");
+    let host_workdir = workdir
+        .canonicalize()
+        .context("failed to resolve working directory")?;
     let container_workdir = mounts::remap_path(
-        &workdir
-            .canonicalize()
-            .context("failed to resolve working directory")?,
+        &host_workdir,
         &home
             .canonicalize()
             .context("failed to resolve home directory")?,
         &container_home,
     );
-    Ok((mounts, container_workdir))
+    Ok(ContainerSetup {
+        mounts,
+        container_workdir,
+        host_workdir,
+    })
 }
 
 /// Resolve mounts and verify the docker image exists.
-fn resolve_container_setup(home: &Path) -> Result<(Vec<mounts::Mount>, PathBuf)> {
+fn resolve_container_setup(
+    home: &Path,
+    agent_state_dirs: &[mounts::AgentStateDir],
+) -> Result<ContainerSetup> {
     if !docker::image_exists()? {
         bail!("image not found — run 'claudecage image build' first");
     }
-    resolve_mounts(home)
+    resolve_mounts(home, agent_state_dirs)
 }
 
 fn run_image_action(action: ImageAction) -> Result<()> {
@@ -167,7 +201,7 @@ fn run_image_action(action: ImageAction) -> Result<()> {
         ImageAction::Build => {
             if docker::image_exists()? {
                 info!(
-                    "image already exists (use 'claudecage image refresh' to refresh Claude/stax or 'claudecage image rebuild' to rebuild from scratch)"
+                    "image already exists (use 'claudecage image refresh' to refresh Claude/Codex/stax or 'claudecage image rebuild' to rebuild from scratch)"
                 );
             } else {
                 docker::build_image(docker::BuildMode::Build)?;
@@ -176,6 +210,26 @@ fn run_image_action(action: ImageAction) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn workdir_for_command<'a>(cmd: &Command, setup: &'a ContainerSetup) -> &'a Path {
+    match cmd {
+        Command::Codex { .. } => &setup.host_workdir,
+        Command::Claude { .. } | Command::Shell { .. } | Command::Run { .. } => {
+            &setup.container_workdir
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn entrypoint_for_command<'a>(cmd: &'a Command) -> docker::Entrypoint<'a> {
+    match cmd {
+        Command::Claude { claude_args } => docker::Entrypoint::Claude(claude_args),
+        Command::Codex { codex_args } => docker::Entrypoint::Codex(codex_args),
+        Command::Shell { shell_args } => docker::Entrypoint::Shell(shell_args),
+        Command::Run { command } => docker::Entrypoint::Run(command),
+        _ => unreachable!(),
+    }
 }
 
 fn run() -> Result<ExitCode> {
@@ -192,21 +246,22 @@ fn run() -> Result<ExitCode> {
             run_image_action(action)?;
             Ok(ExitCode::SUCCESS)
         }
-        ref cmd @ (Command::Claude { .. } | Command::Shell { .. } | Command::Run { .. }) => {
-            let (mounts, container_workdir) = resolve_container_setup(&home)?;
+        ref cmd @ (Command::Claude { .. }
+        | Command::Codex { .. }
+        | Command::Shell { .. }
+        | Command::Run { .. }) => {
+            let setup = resolve_container_setup(&home, mount_profile_for_command(cmd))?;
             let github_token = auth::resolve_github_token()?;
             let env_vars: Vec<(&str, &str)> = github_token
                 .as_deref()
                 .map(|t| vec![("GH_TOKEN", t)])
                 .unwrap_or_default();
-            let entrypoint = match cmd {
-                Command::Claude { claude_args } => docker::Entrypoint::Claude(claude_args),
-                Command::Shell { shell_args } => docker::Entrypoint::Shell(shell_args),
-                Command::Run { command } => docker::Entrypoint::Run(command),
-
-                _ => unreachable!(),
-            };
-            docker::run_container(&mounts, &container_workdir, entrypoint, &env_vars)
+            docker::run_container(
+                &setup.mounts,
+                workdir_for_command(cmd, &setup),
+                entrypoint_for_command(cmd),
+                &env_vars,
+            )
         }
         Command::Auth { action } => {
             match action {
@@ -225,7 +280,11 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Mounts => {
-            let (mut mounts, _) = resolve_mounts(&home)?;
+            let mut mounts = resolve_mounts(
+                &home,
+                &[mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex],
+            )?
+            .mounts;
             mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
             let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
             for mount in &mounts {
@@ -261,6 +320,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use tracing::level_filters::LevelFilter;
 
     #[test]
@@ -291,5 +351,72 @@ mod tests {
     fn log_level_verbose_and_quiet_cancel() {
         assert_eq!(log_level(1, 1), LevelFilter::INFO);
         assert_eq!(log_level(2, 1), LevelFilter::DEBUG);
+    }
+
+    #[test]
+    fn cli_parses_codex_subcommand() {
+        let cli = Cli::try_parse_from(["claudecage", "codex", "--", "-p", "ping"]).unwrap();
+
+        match cli.command {
+            Command::Codex { codex_args } => {
+                assert_eq!(codex_args, vec!["-p".to_string(), "ping".to_string()]);
+            }
+            _ => panic!("expected codex subcommand"),
+        }
+    }
+
+    #[test]
+    fn codex_uses_host_workdir() {
+        let setup = ContainerSetup {
+            mounts: Vec::new(),
+            container_workdir: PathBuf::from("/home/alice/git/project"),
+            host_workdir: PathBuf::from("/Users/alice/git/project"),
+        };
+        let cmd = Command::Codex {
+            codex_args: Vec::new(),
+        };
+
+        assert_eq!(
+            workdir_for_command(&cmd, &setup),
+            Path::new("/Users/alice/git/project")
+        );
+    }
+
+    #[test]
+    fn claude_uses_container_workdir() {
+        let setup = ContainerSetup {
+            mounts: Vec::new(),
+            container_workdir: PathBuf::from("/home/alice/git/project"),
+            host_workdir: PathBuf::from("/Users/alice/git/project"),
+        };
+        let cmd = Command::Claude {
+            claude_args: Vec::new(),
+        };
+
+        assert_eq!(
+            workdir_for_command(&cmd, &setup),
+            Path::new("/home/alice/git/project")
+        );
+    }
+
+    #[test]
+    fn claude_mount_profile_excludes_codex_state() {
+        let profile = mount_profile_for_command(&Command::Claude {
+            claude_args: Vec::new(),
+        });
+
+        assert_eq!(profile, [mounts::AgentStateDir::Claude]);
+    }
+
+    #[test]
+    fn shell_mount_profile_includes_both_agent_state_dirs() {
+        let profile = mount_profile_for_command(&Command::Shell {
+            shell_args: Vec::new(),
+        });
+
+        assert_eq!(
+            profile,
+            [mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex]
+        );
     }
 }

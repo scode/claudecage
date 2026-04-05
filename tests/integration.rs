@@ -16,6 +16,9 @@
 //! - `claude_auth` — Claude is authenticated inside the container (requires prior
 //!   `/login`). The image must already exist or `docker_build` must also be set.
 //!
+//! - `codex_auth` — Codex is authenticated inside the container. The image must
+//!   already exist or `docker_build` must also be set.
+//!
 //! # Examples
 //!
 //! ```sh
@@ -25,12 +28,13 @@
 //! # Full CI run: build image from scratch, then run docker tests
 //! CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build cargo test
 //!
-//! # Everything including end-to-end claude test
-//! CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build,claude_auth cargo test
+//! # Everything including end-to-end claude/codex tests
+//! CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build,claude_auth,codex_auth cargo test
 //! ```
 
 mod common;
 
+use std::io::{Read, Seek, SeekFrom};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::Once;
@@ -185,7 +189,7 @@ fn image_refresh_builds_missing_image() {
 
 /// Verify that the baked image exposes the expected CLI tools on PATH.
 #[test]
-fn image_includes_uv_and_ghstack() {
+fn image_includes_uv_ghstack_and_codex() {
     if !common::capability_enabled("docker_build") {
         return;
     }
@@ -200,14 +204,14 @@ fn image_includes_uv_and_ghstack() {
             "claudecage:latest",
             "bash",
             "-lc",
-            "command -v uv && command -v ghstack",
+            "command -v uv && command -v ghstack && command -v codex",
         ])
         .output()
         .expect("failed to run tool presence check inside image");
 
     assert!(
         output.status.success(),
-        "expected uv and ghstack on PATH, stderr: {}",
+        "expected uv, ghstack, and codex on PATH, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -282,4 +286,39 @@ fn claude_responds_to_prompt() {
         .expect("failed to run claudecage claude");
 
     assert!(status.success(), "claude -p failed with {status}");
+}
+
+/// End-to-end test: run a single-turn Codex prompt inside the container.
+#[test]
+fn codex_responds_to_prompt() {
+    if !common::capability_enabled("codex_auth") {
+        return;
+    }
+    let _guard = IMAGE_TEST_LOCK.lock().unwrap();
+
+    ensure_image();
+
+    let mut stdout = tempfile::tempfile().expect("failed to create stdout temp file");
+    let stderr = tempfile::tempfile().expect("failed to create stderr temp file");
+    let status = Command::new(env!("CARGO_BIN_EXE_claudecage"))
+        .args(["codex", "--", "respond with exactly the word PING"])
+        .stdin(std::process::Stdio::null())
+        .stdout(
+            stdout
+                .try_clone()
+                .expect("failed to clone stdout temp file"),
+        )
+        .stderr(stderr)
+        .status()
+        .expect("failed to run claudecage codex");
+
+    assert!(status.success(), "codex prompt failed with {status}");
+    stdout
+        .seek(SeekFrom::Start(0))
+        .expect("failed to rewind stdout temp file");
+    let mut output = String::new();
+    stdout
+        .read_to_string(&mut output)
+        .expect("failed to read codex output");
+    assert_eq!(output.trim(), "PING", "unexpected codex output: {output:?}");
 }
