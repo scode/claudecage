@@ -62,7 +62,8 @@ RUN git config --system credential.https://github.com.helper '!/home/linuxbrew/.
 
 # Declared here so `image refresh` invalidates only the refreshable tail.
 ARG REFRESH_MARKER=stable
-RUN echo "${REFRESH_MARKER}" > /dev/null && npm install -g @anthropic-ai/claude-code@latest
+RUN echo "${REFRESH_MARKER}" > /dev/null \
+    && npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
 
 USER ${USERNAME}
 RUN echo "${REFRESH_MARKER}" > /dev/null && brew update && brew install cesarferreira/tap/stax
