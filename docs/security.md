@@ -70,7 +70,7 @@ invocation, `~/.ssh` becomes visible read-only inside the container — exposing
 This is bounded by `$HOME` (symlink targets outside `$HOME` are rejected), but sensitive directories like `~/.ssh`,
 `~/.aws`, and `~/.config` are inside that boundary.
 
-claudecage now puts an approval gate in front of that visibility change. Before launch, it compares the current
+claudecage puts an approval gate in front of that visibility change. Before launch, it compares the current
 non-project mount set against the last approved snapshot for the relevant profile, prints a unified diff when the set
 changed, and refuses to launch until the user explicitly approves it. That closes the silent-escalation path, but not
 the underlying possibility that a user may choose to approve a newly exposed directory.
