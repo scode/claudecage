@@ -52,8 +52,8 @@ pub fn image_exists() -> Result<bool> {
 
 /// Build the Docker image from the embedded Dockerfile.
 ///
-/// The image includes a non-root user matching the host user's uid/gid
-/// so claude doesn't refuse to run (it rejects root).
+/// The image includes a non-root user matching the host user's uid/gid so the
+/// bundled agents do not run as root inside the container.
 pub fn build_image(mode: BuildMode) -> Result<()> {
     let tmp = tempfile::tempdir().context("failed to create temp dir for Dockerfile")?;
     let dockerfile_path = tmp.path().join("Dockerfile");
@@ -141,8 +141,45 @@ fn write_env_file(writer: &mut impl Write, env_vars: &[(&str, &str)]) -> Result<
 
 pub enum Entrypoint<'a> {
     Claude(&'a [String]),
+    Codex(&'a [String]),
     Shell(&'a [String]),
-    Run(&'a str),
+    Run(String),
+}
+
+fn entrypoint_args(entrypoint: Entrypoint<'_>) -> Vec<OsString> {
+    let mut args = Vec::new();
+    match entrypoint {
+        Entrypoint::Claude(claude_args) => {
+            args.extend([
+                OsString::from("claude"),
+                OsString::from("--dangerously-skip-permissions"),
+                OsString::from("--settings"),
+                OsString::from(r#"{"skipDangerousModePermissionPrompt": true}"#),
+            ]);
+            args.extend(claude_args.iter().cloned().map(OsString::from));
+        }
+        Entrypoint::Codex(codex_args) => {
+            args.extend([
+                OsString::from("codex"),
+                OsString::from("--dangerously-bypass-approvals-and-sandbox"),
+                OsString::from("-c"),
+                OsString::from(r#"cli_auth_credentials_store="file""#),
+            ]);
+            args.extend(codex_args.iter().cloned().map(OsString::from));
+        }
+        Entrypoint::Shell(shell_args) => {
+            args.push(OsString::from("bash"));
+            args.extend(shell_args.iter().cloned().map(OsString::from));
+        }
+        Entrypoint::Run(command) => {
+            args.extend([
+                OsString::from("bash"),
+                OsString::from("-c"),
+                OsString::from(command),
+            ]);
+        }
+    }
+    args
 }
 
 /// Run an ephemeral container with the given mounts and working directory.
@@ -212,25 +249,7 @@ pub fn run_container(
 
     cmd.arg(IMAGE_NAME);
 
-    match entrypoint {
-        Entrypoint::Claude(claude_args) => {
-            // Suppress the interactive TOS prompt — redundant inside a sandbox.
-            cmd.args([
-                "claude",
-                "--dangerously-skip-permissions",
-                "--settings",
-                r#"{"skipDangerousModePermissionPrompt": true}"#,
-            ]);
-            cmd.args(claude_args);
-        }
-        Entrypoint::Shell(shell_args) => {
-            cmd.arg("bash");
-            cmd.args(shell_args);
-        }
-        Entrypoint::Run(command) => {
-            cmd.args(["bash", "-c", command]);
-        }
-    }
+    cmd.args(entrypoint_args(entrypoint));
 
     debug!(?cmd, "docker run");
 
@@ -317,5 +336,32 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.to_string_lossy().starts_with("REFRESH_MARKER=")));
+    }
+
+    #[test]
+    fn codex_entrypoint_uses_bypass_flag_and_file_backed_auth() {
+        let args = entrypoint_args(Entrypoint::Codex(&["-p".to_string(), "ping".to_string()]));
+        let rendered: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert_eq!(rendered[0], "codex");
+        assert!(rendered.contains(&std::borrow::Cow::Borrowed(
+            "--dangerously-bypass-approvals-and-sandbox"
+        )));
+        assert!(rendered.contains(&std::borrow::Cow::Borrowed("-c")));
+        assert!(rendered.contains(&std::borrow::Cow::Borrowed(
+            r#"cli_auth_credentials_store="file""#
+        )));
+    }
+
+    #[test]
+    fn codex_entrypoint_preserves_user_args() {
+        let args = entrypoint_args(Entrypoint::Codex(&[
+            "exec".to_string(),
+            "--help".to_string(),
+        ]));
+        let rendered: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert!(rendered.ends_with(&[
+            std::borrow::Cow::Borrowed("exec"),
+            std::borrow::Cow::Borrowed("--help"),
+        ]));
     }
 }
