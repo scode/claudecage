@@ -29,7 +29,7 @@ claudecage codex            # first run: complete the Codex login flow
 claudecage codex -- "fix the build"  # start an interactive Codex session with an initial prompt
 claudecage codex -- exec "fix the build"  # run Codex non-interactively
 claudecage shell             # open a bash shell in the container
-claudecage mounts            # show mounts for the default shell/run profile
+claudecage mounts            # show mounts for all profiles
 claudecage mounts codex      # show mounts for the codex profile
 claudecage auth set-github-token     # store a GitHub PAT for PR access
 claudecage auth remove-github-token  # remove the stored token
