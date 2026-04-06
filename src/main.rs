@@ -33,6 +33,7 @@ fn mount_profile_for_command(cmd: &Command) -> &'static [mounts::AgentStateDir] 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum MountProfile {
+    All,
     Claude,
     Codex,
     Shell,
@@ -41,11 +42,37 @@ enum MountProfile {
 
 fn mount_profile_for_listing(profile: MountProfile) -> &'static [mounts::AgentStateDir] {
     match profile {
+        MountProfile::All => &[mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex],
         MountProfile::Claude => &[mounts::AgentStateDir::Claude],
         MountProfile::Codex => &[mounts::AgentStateDir::Codex],
         MountProfile::Shell | MountProfile::Run => {
             &[mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex]
         }
+    }
+}
+
+fn mount_profile_label(profile: MountProfile) -> &'static str {
+    match profile {
+        MountProfile::All => "all",
+        MountProfile::Claude => "claude",
+        MountProfile::Codex => "codex",
+        MountProfile::Shell => "shell",
+        MountProfile::Run => "run",
+    }
+}
+
+fn mount_profiles_to_print(profile: MountProfile) -> &'static [MountProfile] {
+    match profile {
+        MountProfile::All => &[
+            MountProfile::Claude,
+            MountProfile::Codex,
+            MountProfile::Shell,
+            MountProfile::Run,
+        ],
+        MountProfile::Claude => &[MountProfile::Claude],
+        MountProfile::Codex => &[MountProfile::Codex],
+        MountProfile::Shell => &[MountProfile::Shell],
+        MountProfile::Run => &[MountProfile::Run],
     }
 }
 
@@ -93,8 +120,8 @@ enum Command {
     },
     /// Show what mounts would be created in the container.
     Mounts {
-        /// Which command profile to show mounts for. Defaults to the shell/run profile.
-        #[arg(value_enum, default_value_t = MountProfile::Shell)]
+        /// Which command profile to show mounts for. Defaults to all profiles.
+        #[arg(value_enum, default_value_t = MountProfile::All)]
         profile: MountProfile,
     },
     /// Manage the claudecage Docker image.
@@ -171,28 +198,6 @@ fn log_level(verbose: u8, quiet: u8) -> tracing::level_filters::LevelFilter {
     let base: i8 = 3; // INFO
     let idx = (base + verbose as i8 - quiet as i8).clamp(0, LEVELS.len() as i8 - 1);
     LEVELS[idx as usize]
-}
-
-/// Validate the working directory and resolve mounts and both visible workdir paths.
-///
-/// `materialize_state` controls whether missing agent state should be created
-/// on disk. Launch-time mount approval uses a non-mutating preview first so the
-/// user can reject a changed mount set without claudecage having already
-/// created persistent state on the host.
-fn resolve_mounts(
-    home: &Path,
-    agent_state_dirs: &[mounts::AgentStateDir],
-    preserve_visible_host_workdir: bool,
-    materialize_state: bool,
-) -> Result<ContainerSetup> {
-    let workdir = std::env::current_dir().context("could not determine working directory")?;
-    resolve_mounts_for_workdir(
-        home,
-        &workdir,
-        agent_state_dirs,
-        preserve_visible_host_workdir,
-        materialize_state,
-    )
 }
 
 /// Resolve mounts for an explicit working directory.
@@ -412,30 +417,52 @@ fn print_mounts(
     profile: MountProfile,
     output: &mut impl std::io::Write,
 ) -> Result<()> {
-    let mut mounts = resolve_mounts(
-        home,
-        mount_profile_for_listing(profile),
-        matches!(profile, MountProfile::Codex),
-        true,
-    )?
-    .mounts;
-    mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
+    let workdir = std::env::current_dir().context("could not determine working directory")?;
+    print_mounts_for_workdir(home, &workdir, profile, output)
+}
+
+fn print_mounts_for_workdir(
+    home: &Path,
+    workdir: &Path,
+    profile: MountProfile,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
     let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    for mount in &mounts {
-        let mode = match (mount.readonly, use_color) {
-            (true, true) => "\x1b[90m(ro)\x1b[0m",
-            (true, false) => "(ro)",
-            (false, true) => "\x1b[31m(rw)\x1b[0m",
-            (false, false) => "(rw)",
-        };
-        writeln!(
-            output,
-            "{} {} -> {}",
-            mode,
-            mount.host_path.display(),
-            mount.container_path.display(),
-        )
-        .context("failed to write mount listing")?;
+    let profiles = mount_profiles_to_print(profile);
+    for (idx, current) in profiles.iter().copied().enumerate() {
+        if profile == MountProfile::All {
+            if idx > 0 {
+                writeln!(output).context("failed to write mount listing")?;
+            }
+            writeln!(output, "[{}]", mount_profile_label(current))
+                .context("failed to write mount listing")?;
+        }
+
+        let mut setup = resolve_mounts_for_workdir(
+            home,
+            workdir,
+            mount_profile_for_listing(current),
+            matches!(current, MountProfile::Codex),
+            true,
+        )?;
+        let mut mounts = std::mem::take(&mut setup.mounts);
+        mounts.sort_by(|a, b| a.host_path.cmp(&b.host_path));
+        for mount in &mounts {
+            let mode = match (mount.readonly, use_color) {
+                (true, true) => "\x1b[90m(ro)\x1b[0m",
+                (true, false) => "(ro)",
+                (false, true) => "\x1b[31m(rw)\x1b[0m",
+                (false, false) => "(rw)",
+            };
+            writeln!(
+                output,
+                "{} {} -> {}",
+                mode,
+                mount.host_path.display(),
+                mount.container_path.display(),
+            )
+            .context("failed to write mount listing")?;
+        }
     }
     Ok(())
 }
@@ -640,6 +667,18 @@ mod tests {
     }
 
     #[test]
+    fn cli_defaults_mounts_profile_to_all() {
+        let cli = Cli::try_parse_from(["claudecage", "mounts"]).unwrap();
+
+        match cli.command {
+            Command::Mounts { profile } => {
+                assert_eq!(profile, MountProfile::All);
+            }
+            _ => panic!("expected mounts subcommand"),
+        }
+    }
+
+    #[test]
     fn codex_uses_host_workdir() {
         let setup = ContainerSetup {
             mounts: Vec::new(),
@@ -694,6 +733,33 @@ mod tests {
             profile,
             [mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex]
         );
+    }
+
+    #[test]
+    fn all_listing_mount_profile_includes_both_agent_state_dirs() {
+        let profile = mount_profile_for_listing(MountProfile::All);
+
+        assert_eq!(
+            profile,
+            [mounts::AgentStateDir::Claude, mounts::AgentStateDir::Codex]
+        );
+    }
+
+    #[test]
+    fn print_mounts_all_includes_each_profile_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        let mut output = Vec::new();
+        print_mounts_for_workdir(&home, &project, MountProfile::All, &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("[claude]\n"));
+        assert!(output.contains("[codex]\n"));
+        assert!(output.contains("[shell]\n"));
+        assert!(output.contains("[run]\n"));
     }
 
     #[test]

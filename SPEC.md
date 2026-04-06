@@ -103,10 +103,11 @@ snapshot exists yet, claudecage must print a unified diff and require explicit u
 ### `claudecage mounts [profile]`
 
 Print the bind mounts that would be used for the requested command profile in the current working directory. Valid
-profiles are `claude`, `codex`, `shell`, and `run`; the default is `shell`. Each line shows the read/write mode, host
-path, and container path. Output is sorted by host path. When stdout is a terminal, the mode tag is colorized (grey for
-read-only, red for read-write). Does not require the Docker image to exist. This command must not read, prompt about, or
-update the persisted mount-approval snapshots.
+profiles are `all`, `claude`, `codex`, `shell`, and `run`; the default is `all`. The `all` profile prints separate
+sections for `claude`, `codex`, `shell`, and `run`, in that order. Each line shows the read/write mode, host path, and
+container path. Mounts inside each section are sorted by host path. When stdout is a terminal, the mode tag is colorized
+(grey for read-only, red for read-write). Does not require the Docker image to exist. This command must not read, prompt
+about, or update the persisted mount-approval snapshots.
 
 ### `claudecage auth set-github-token`
 
