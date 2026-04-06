@@ -270,13 +270,6 @@ fn claude_container_state_file(home: &Path, materialize_state: bool) -> Result<P
     Ok(state_file)
 }
 
-/// Resolve claudecage-owned state and reject symlink indirection.
-///
-/// `~/.claudecage` now holds two different kinds of trust anchors: Claude's
-/// container-only runtime state and the persisted mount-approval baselines. If
-/// this path could be redirected into `~/.claude`, `~/.codex`, or some other
-/// agent-writable location, a compromised session could rewrite the very files
-/// that are supposed to gate later launches.
 /// Resolve claudecage-owned host state and reject indirection.
 ///
 /// Both Claude's container-only runtime state and the mount-approval baselines
@@ -289,18 +282,27 @@ pub(crate) fn claudecage_state_dir(home: &Path, materialize_state: bool) -> Resu
         .canonicalize()
         .context("failed to resolve home directory")?;
     let state_dir = home.join(CLAUDE_CONTAINER_STATE_DIR);
-    if state_dir.exists() {
-        let meta = state_dir
-            .symlink_metadata()
-            .with_context(|| format!("failed to inspect ~/{CLAUDE_CONTAINER_STATE_DIR}"))?;
-        if meta.file_type().is_symlink() {
-            bail!("~/{CLAUDE_CONTAINER_STATE_DIR} must not be a symlink");
+    match state_dir.symlink_metadata() {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                bail!("~/{CLAUDE_CONTAINER_STATE_DIR} must not be a symlink");
+            }
+            if !meta.is_dir() {
+                bail!("~/{CLAUDE_CONTAINER_STATE_DIR} must be a directory");
+            }
         }
-    } else if materialize_state {
-        std::fs::create_dir(&state_dir)
-            .with_context(|| format!("failed to create ~/{CLAUDE_CONTAINER_STATE_DIR}"))?;
-    } else {
-        return Ok(state_dir);
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if materialize_state {
+                std::fs::create_dir(&state_dir)
+                    .with_context(|| format!("failed to create ~/{CLAUDE_CONTAINER_STATE_DIR}"))?;
+            } else {
+                return Ok(state_dir);
+            }
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to inspect ~/{CLAUDE_CONTAINER_STATE_DIR}"));
+        }
     }
 
     let state_dir = state_dir
@@ -831,6 +833,24 @@ mod tests {
             .unwrap_err();
         assert!(
             err.to_string().contains("must not be a symlink"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_mounts_rejects_claudecage_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(home.join(".claude")).unwrap();
+        fs::write(home.join(".claudecage"), "not a directory").unwrap();
+        let project = home.join("project");
+        fs::create_dir(&project).unwrap();
+
+        let err = resolve_mounts(&home, &container_home(), &project, &[AgentStateDir::Claude])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be a directory"),
             "unexpected error: {err}"
         );
     }

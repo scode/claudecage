@@ -321,6 +321,7 @@ fn prepare_launch_setup_for_workdir(
         matches!(cmd, Command::Codex { .. }),
         false,
     )?;
+    let preview_snapshot = mount_approval::render_snapshot(&preview.mounts, &preview.project_root);
     mount_approval::enforce_mount_approval(
         home,
         approval_profile_for_command(cmd),
@@ -330,13 +331,22 @@ fn prepare_launch_setup_for_workdir(
         stdin,
         output,
     )?;
-    resolve_mounts_for_workdir(
+    let materialized = resolve_mounts_for_workdir(
         home,
         workdir,
         mount_profile_for_command(cmd),
         matches!(cmd, Command::Codex { .. }),
         true,
-    )
+    )?;
+    let materialized_snapshot =
+        mount_approval::render_snapshot(&materialized.mounts, &materialized.project_root);
+    if materialized_snapshot != preview_snapshot {
+        bail!(
+            "mount set changed after approval was granted; rerun so claudecage can show and approve the updated mount diff"
+        );
+    }
+
+    Ok(materialized)
 }
 
 fn run_image_action(action: ImageAction) -> Result<()> {
@@ -453,16 +463,12 @@ fn run() -> Result<ExitCode> {
             }
             let stdin = std::io::stdin();
             let stderr = std::io::stderr();
+            // Approval needs a readable terminal on stdin. The diff and prompt can
+            // still be emitted when stderr is redirected.
+            let interactive = std::io::IsTerminal::is_terminal(&stdin);
             let mut stdin = stdin.lock();
             let mut stderr = stderr.lock();
-            let setup = prepare_launch_setup(
-                &home,
-                cmd,
-                &mut stdin,
-                &mut stderr,
-                std::io::IsTerminal::is_terminal(&std::io::stdin())
-                    && std::io::IsTerminal::is_terminal(&std::io::stderr()),
-            )?;
+            let setup = prepare_launch_setup(&home, cmd, &mut stdin, &mut stderr, interactive)?;
             let github_token = auth::resolve_github_token()?;
             let env_vars: Vec<(&str, &str)> = github_token
                 .as_deref()
@@ -518,8 +524,54 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
     use std::io::Write;
+    use std::io::{BufRead, Read};
     use std::os::unix::fs as unix_fs;
     use tracing::level_filters::LevelFilter;
+
+    struct MutatingApprovalInput {
+        inner: Cursor<Vec<u8>>,
+        mutation_done: bool,
+        source_dir: PathBuf,
+        target_dir: PathBuf,
+    }
+
+    impl MutatingApprovalInput {
+        fn new(source_dir: PathBuf, target_dir: PathBuf) -> Self {
+            Self {
+                inner: Cursor::new(b"yes\n".to_vec()),
+                mutation_done: false,
+                source_dir,
+                target_dir,
+            }
+        }
+
+        fn apply_mutation(&mut self) {
+            if self.mutation_done {
+                return;
+            }
+            fs::create_dir_all(&self.target_dir).unwrap();
+            unix_fs::symlink(&self.target_dir, self.source_dir.join("skills")).unwrap();
+            self.mutation_done = true;
+        }
+    }
+
+    impl Read for MutatingApprovalInput {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.apply_mutation();
+            self.inner.read(buf)
+        }
+    }
+
+    impl BufRead for MutatingApprovalInput {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            self.apply_mutation();
+            self.inner.fill_buf()
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.inner.consume(amt);
+        }
+    }
 
     #[test]
     fn log_level_defaults_to_info() {
@@ -793,6 +845,35 @@ mod tests {
             mount_approval::render_snapshot(&preview.mounts, &preview.project_root),
             mount_approval::render_snapshot(&materialized.mounts, &materialized.project_root)
         );
+    }
+
+    #[test]
+    fn prepare_launch_setup_rejects_mount_changes_after_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("project");
+        let claude_dir = home.join(".claude");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&claude_dir).unwrap();
+        let target_dir = home.join("late-added-target");
+
+        let mut input = MutatingApprovalInput::new(claude_dir, target_dir);
+        let mut output = Vec::new();
+        let err = prepare_launch_setup_for_workdir(
+            &home,
+            &project,
+            &Command::Claude {
+                claude_args: Vec::new(),
+            },
+            &mut input,
+            &mut output,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("mount set changed after approval was granted"));
     }
 
     #[test]
