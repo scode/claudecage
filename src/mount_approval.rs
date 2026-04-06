@@ -460,6 +460,54 @@ mod tests {
     }
 
     #[test]
+    fn enforce_mount_approval_rejects_broken_symlinked_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        std::os::unix::fs::symlink(home.join("missing"), home.join(".claudecage")).unwrap();
+        let mounts = vec![mount("/tmp/state", "/tmp/state", true)];
+        let mut input = Cursor::new("yes\n");
+        let mut output = Vec::new();
+
+        let err = enforce_mount_approval(
+            &home,
+            ApprovalProfile::Claude,
+            &mounts,
+            Path::new("/Users/alice/project"),
+            true,
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must not be a symlink"));
+    }
+
+    #[test]
+    fn enforce_mount_approval_rejects_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join(".claudecage"), "not a directory").unwrap();
+        let mounts = vec![mount("/tmp/state", "/tmp/state", true)];
+        let mut input = Cursor::new("yes\n");
+        let mut output = Vec::new();
+
+        let err = enforce_mount_approval(
+            &home,
+            ApprovalProfile::Claude,
+            &mounts,
+            Path::new("/Users/alice/project"),
+            true,
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must be a directory"));
+    }
+
+    #[test]
     fn render_snapshot_keeps_readonly_mount_on_project_path() {
         let mounts = vec![
             mount("/Users/alice/project", "/home/alice/project", false),

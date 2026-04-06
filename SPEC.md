@@ -255,6 +255,10 @@ When the current snapshot differs from the approved snapshot, claudecage writes 
 for container-visible host paths. It then asks the user whether to approve the new set. Approval updates the persisted
 snapshot for that profile; rejection aborts launch and leaves the previous snapshot untouched.
 
+Approval is for the previewed mount set, not a stale earlier computation. After approval, claudecage materializes the
+real launch mounts and must abort if that resulting non-project mount set no longer matches what the user just approved.
+The user must rerun so claudecage can show and approve the updated diff.
+
 If approval is required but stdin is not a terminal, claudecage must print the unified diff and fail rather than
 launching without confirmation.
 
