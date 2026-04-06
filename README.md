@@ -70,10 +70,12 @@ your GitHub username and token, so runtime `GH_TOKEN` injection by itself is not
 ## Image management
 
 - `claudecage image build` — builds a Docker image (Ubuntu 24.04 + Node 22 + system `bubblewrap` + claude-code + codex +
-  Homebrew + `gh` + `uv` + `ghstack`) with a non-root user matching the host user's uid/gid. Only needs to be run once.
+  Homebrew + `gh` + `jj` + `uv` + `ghstack`) with a non-root user matching the host user's uid/gid. Only needs to be run
+  once.
 - `claudecage image refresh` — rebuilds just the refreshable tail of the image so cached base layers are reused while
   Claude Code, Codex CLI, and stax are reinstalled at their current upstream versions. Also works when the image does
-  not exist yet.
+  not exist yet. NOTE: this does not pick up changes to the baked-in base tool set; when that changes, use
+  `claudecage image rebuild`.
 - `claudecage image rebuild` — rebuilds the image from scratch with no Docker cache. Use after upgrading claudecage,
   when you need fresh versions of non-refreshable image dependencies, or when something is wrong with the image.
 
