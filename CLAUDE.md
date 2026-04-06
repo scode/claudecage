@@ -22,3 +22,15 @@ Rules:
   `fix`, not `refactor`. A new CLI flag is `feat`, not `chore`.
 - The summary after the colon is lowercase, imperative mood, no trailing period.
 - Keep the first line under 72 characters.
+
+## Required Checks Before Finish Or PR
+
+Before finishing work, and again before creating or updating a PR, run all of these from the repo root:
+
+- `cargo fmt`
+- `cargo clippy`
+- `cargo test`
+- `dprint fmt`
+
+Do not skip any of them just because the change looks small or docs-only. Leave the working tree in the post-format
+state those commands produce.
