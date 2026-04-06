@@ -189,7 +189,7 @@ fn image_refresh_builds_missing_image() {
 
 /// Verify that the baked image exposes the expected CLI tools on PATH.
 #[test]
-fn image_includes_uv_ghstack_codex_and_bwrap() {
+fn image_includes_uv_ghstack_codex_jj_and_bwrap() {
     if !common::capability_enabled("docker_build") {
         return;
     }
@@ -204,14 +204,14 @@ fn image_includes_uv_ghstack_codex_and_bwrap() {
             "claudecage:latest",
             "bash",
             "-lc",
-            "command -v uv && command -v ghstack && command -v codex && command -v bwrap",
+            "command -v uv && command -v ghstack && command -v codex && command -v jj && command -v bwrap",
         ])
         .output()
         .expect("failed to run tool presence check inside image");
 
     assert!(
         output.status.success(),
-        "expected uv, ghstack, codex, and bwrap on PATH, stderr: {}",
+        "expected uv, ghstack, codex, jj, and bwrap on PATH, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

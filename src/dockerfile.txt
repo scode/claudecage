@@ -35,7 +35,7 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 ENV PATH="/home/${USERNAME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
     LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install dprint gh sapling scode/dist-tap/leiter rust uv
+RUN brew install dprint gh jj sapling scode/dist-tap/leiter rust uv
 RUN uv tool install ghstack
 
 # Remove temporary sudo grant, configure system-level git settings, and
