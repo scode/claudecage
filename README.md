@@ -168,6 +168,10 @@ CLAUDECAGE_TEST_CAPABILITIES=docker,docker_build,claude_auth,codex_auth cargo te
 
 Without the variable set, integration tests are silently skipped.
 
+Image builds do a narrow cleanup before and after invoking Docker: claudecage prunes dangling Docker images carrying its
+own label. It does not run `docker system prune`, remove volumes, or prune shared builder cache, because those can
+affect unrelated local projects.
+
 ## Verbosity
 
 Default log level is INFO. Use `-v` to increase (DEBUG, TRACE) or `-q` to decrease (WARN, ERROR, OFF). These stack:
