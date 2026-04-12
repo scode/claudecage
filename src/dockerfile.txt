@@ -14,6 +14,9 @@ RUN apt-get update \
         file \
         git \
         imagemagick \
+        libxcb1-dev \
+        libxkbcommon-dev \
+        libxkbcommon-x11-dev \
         less \
         procps \
         sudo \
