@@ -3,7 +3,7 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +12,8 @@ use tracing::{debug, info};
 use crate::mounts::Mount;
 
 const IMAGE_NAME: &str = "claudecage:latest";
+const IMAGE_LABEL_KEY: &str = "org.scode.claudecage";
+const IMAGE_LABEL_VALUE: &str = "true";
 const DOCKERFILE: &str = include_str!("dockerfile.txt");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,23 +72,78 @@ pub fn build_image(mode: BuildMode) -> Result<()> {
             .to_string(),
     };
 
+    run_image_build(mode, &dockerfile_path, tmp.path(), &build_context, |args| {
+        let mut cmd = Command::new("docker");
+        cmd.args(args);
+        cmd.status().context("failed to run docker")
+    })
+}
+
+fn run_image_build(
+    mode: BuildMode,
+    dockerfile_path: &Path,
+    context_path: &Path,
+    build_context: &BuildContext,
+    mut run_docker: impl FnMut(&[OsString]) -> Result<ExitStatus>,
+) -> Result<()> {
+    run_prune(&mut run_docker)?;
+
     info!("building Docker image {IMAGE_NAME}");
-
-    let mut cmd = Command::new("docker");
-    cmd.args(build_command_args(
-        mode,
-        &dockerfile_path,
-        tmp.path(),
-        &build_context,
-    ));
-
-    let status = cmd.status().context("failed to run docker build")?;
+    let build_args = build_command_args(mode, dockerfile_path, context_path, build_context);
+    let status = run_docker(&build_args).context("failed to run docker build")?;
+    let post_build_prune = run_prune(&mut run_docker);
 
     if !status.success() {
+        if let Err(err) = post_build_prune {
+            debug!(
+                ?err,
+                "post-build claudecage image prune failed after unsuccessful build"
+            );
+        }
         bail!("docker build failed with {status}");
     }
 
+    post_build_prune?;
+
     Ok(())
+}
+
+/// Remove old claudecage image objects without touching other Docker state.
+///
+/// Docker keeps the previous image object around as dangling data when a build
+/// retags `claudecage:latest`. Those old objects are ours, but the global
+/// builder cache is shared with every other Docker workload on the machine, so
+/// this deliberately does not run `docker system prune` or `docker builder
+/// prune`. Running this before and after a build keeps both stale leftovers and
+/// the just-replaced image from accumulating.
+fn run_prune(run_docker: &mut impl FnMut(&[OsString]) -> Result<ExitStatus>) -> Result<()> {
+    info!("pruning old claudecage Docker images");
+    let status =
+        run_docker(&prune_claudecage_image_args()).context("failed to run docker image prune")?;
+
+    if !status.success() {
+        bail!("docker image prune failed with {status}");
+    }
+
+    Ok(())
+}
+
+fn image_label() -> String {
+    format!("{IMAGE_LABEL_KEY}={IMAGE_LABEL_VALUE}")
+}
+
+fn image_label_filter() -> String {
+    format!("label={}", image_label())
+}
+
+fn prune_claudecage_image_args() -> Vec<OsString> {
+    vec![
+        OsString::from("image"),
+        OsString::from("prune"),
+        OsString::from("--force"),
+        OsString::from("--filter"),
+        OsString::from(image_label_filter()),
+    ]
 }
 
 fn build_command_args(
@@ -99,6 +156,8 @@ fn build_command_args(
         OsString::from("build"),
         OsString::from("-t"),
         OsString::from(IMAGE_NAME),
+        OsString::from("--label"),
+        OsString::from(image_label()),
         OsString::from("-f"),
         dockerfile_path.as_os_str().to_os_string(),
         OsString::from("--build-arg"),
@@ -261,6 +320,21 @@ pub fn run_container(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn success_status() -> ExitStatus {
+        ExitStatus::from_raw(0)
+    }
+
+    fn failure_status() -> ExitStatus {
+        ExitStatus::from_raw(1 << 8)
+    }
+
+    fn render_args(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
 
     fn build_context() -> BuildContext {
         BuildContext {
@@ -305,6 +379,97 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.to_string_lossy().starts_with("REFRESH_MARKER=")));
+    }
+
+    #[test]
+    fn build_labels_image_as_claudecage_owned() {
+        let args = build_command_args(
+            BuildMode::Build,
+            Path::new("/tmp/Dockerfile"),
+            Path::new("/tmp/context"),
+            &build_context(),
+        );
+
+        assert!(args.windows(2).any(|window| window
+            == [
+                OsString::from("--label"),
+                OsString::from("org.scode.claudecage=true")
+            ]));
+    }
+
+    #[test]
+    fn cleanup_prunes_only_dangling_claudecage_labeled_images() {
+        let args = prune_claudecage_image_args();
+
+        assert_eq!(
+            render_args(&args),
+            [
+                "image",
+                "prune",
+                "--force",
+                "--filter",
+                "label=org.scode.claudecage=true"
+            ]
+        );
+        assert!(!render_args(&args).contains(&"--all".to_string()));
+    }
+
+    #[test]
+    fn image_build_prunes_before_and_after_successful_build() {
+        let mut commands = Vec::new();
+
+        run_image_build(
+            BuildMode::Build,
+            Path::new("/tmp/Dockerfile"),
+            Path::new("/tmp/context"),
+            &build_context(),
+            |args| {
+                commands.push(render_args(args));
+                Ok(success_status())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0], render_args(&prune_claudecage_image_args()));
+        assert_eq!(commands[1][0], "build");
+        assert_eq!(commands[2], render_args(&prune_claudecage_image_args()));
+    }
+
+    #[test]
+    fn image_build_prunes_after_failed_build() {
+        let mut commands = Vec::new();
+        let mut calls = 0;
+
+        let err = run_image_build(
+            BuildMode::Build,
+            Path::new("/tmp/Dockerfile"),
+            Path::new("/tmp/context"),
+            &build_context(),
+            |args| {
+                calls += 1;
+                commands.push(render_args(args));
+                if calls == 2 {
+                    Ok(failure_status())
+                } else {
+                    Ok(success_status())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("docker build failed"));
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0], render_args(&prune_claudecage_image_args()));
+        assert_eq!(commands[1][0], "build");
+        assert_eq!(commands[2], render_args(&prune_claudecage_image_args()));
+    }
+
+    #[test]
+    fn dockerfile_cleans_package_manager_caches() {
+        assert_eq!(DOCKERFILE.matches("brew cleanup --prune=all").count(), 4);
+        assert_eq!(DOCKERFILE.matches(r#"rm -rf "$(brew --cache)""#).count(), 4);
+        assert!(DOCKERFILE.contains("uv cache clean"));
     }
 
     #[test]

@@ -127,6 +127,10 @@ Remove the stored GitHub token from the Keychain. Exits successfully whether or 
 
 Build the Docker image if it does not already exist.
 
+Before and after building, claudecage prunes dangling Docker images labeled as claudecage-owned. It must not run broad
+Docker cleanup commands such as `docker system prune` or unfiltered builder-cache cleanup, because those can delete
+unrelated state from other local projects.
+
 The image must include a non-root user matching the host user's uid and gid so that the agent does not run as root
 inside the container.
 
@@ -147,6 +151,9 @@ the rest of the Docker cache.
 Rebuild the Docker image while preserving cached base layers but forcing Claude Code, Codex CLI, and `stax` to
 reinstall.
 
+Before and after building, claudecage prunes dangling Docker images labeled as claudecage-owned. It does not prune
+unrelated Docker images, containers, volumes, networks, or shared builder cache.
+
 If the image does not exist yet, `image refresh` builds it. It does not pick up changes to the baked-in base tool set.
 
 ### `claudecage image rebuild`
@@ -154,6 +161,9 @@ If the image does not exist yet, `image refresh` builds it. It does not pick up 
 Rebuild the Docker image from scratch, bypassing all Docker layer caches. Use this to pick up changes to the baked-in
 base tool set, fresh versions of claude-code, Codex CLI, `stax`, or any other image dependency, or to recover from a
 broken image.
+
+Before and after building, claudecage prunes dangling Docker images labeled as claudecage-owned. It does not prune
+unrelated Docker images, containers, volumes, networks, or shared builder cache.
 
 ### Verbosity
 

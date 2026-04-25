@@ -1,4 +1,5 @@
 FROM ubuntu:24.04
+LABEL org.scode.claudecage=true
 
 ARG USERNAME
 ARG UID
@@ -38,8 +39,16 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 ENV PATH="/home/${USERNAME}/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}" \
     LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib"
 
-RUN brew install dprint gh jj sapling scode/dist-tap/leiter rust uv
-RUN uv tool install ghstack
+RUN brew install dprint gh jj \
+    && brew cleanup --prune=all \
+    && rm -rf "$(brew --cache)"
+RUN brew install sapling scode/dist-tap/leiter \
+    && brew cleanup --prune=all \
+    && rm -rf "$(brew --cache)"
+RUN brew install rust uv \
+    && brew cleanup --prune=all \
+    && rm -rf "$(brew --cache)"
+RUN uv tool install ghstack && uv cache clean
 
 # Remove temporary sudo grant, configure system-level git settings, and
 # create a symlink from the host home path to the container home path.
@@ -70,4 +79,8 @@ RUN echo "${REFRESH_MARKER}" > /dev/null \
     && npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
 
 USER ${USERNAME}
-RUN echo "${REFRESH_MARKER}" > /dev/null && brew update && brew install cesarferreira/tap/stax
+RUN echo "${REFRESH_MARKER}" > /dev/null \
+    && brew update \
+    && brew install cesarferreira/tap/stax \
+    && brew cleanup --prune=all \
+    && rm -rf "$(brew --cache)"
